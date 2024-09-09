@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New Project</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif;
+    }
+    input::placeholder {
+      color: #BFBFBF; /* Placeholder text color */
+    }
+    input {
+      color: #404040; /* Text color when user types */
+      border: 1px solid #D9D9D9;
+      border-radius: 8px;
+      padding: 6px 8px;
+    }
+    div {
+      margin-bottom: 10px;
+    }
+    p {
+      margin: 0;
+      color: #404040;
+      font-size: 6px;
+      font-weight: 800;
+    }
+    input:focus {
+      border-color: #D9D9D9; /* Border color when the input is focused */
+      box-shadow: none; /* Removes any default box shadow */
+
+    }
+    button {
+      margin-top: 10px;
+      padding: 6px 12px;
+      border: none;
+      border-radius: 4px;
+      background-color: #007BFF;
+      color: white;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <div>
+    <div style="display: flex; gap: 4px; flex-direction: column">
+      <p>PROJECT NAME</p>
+      <input id="projectName" spellcheck="false" type="text" placeholder="Project name..." />
+    </div>
+    <div style="display: flex; gap: 4px; flex-direction: column">
+        <p>PROJECT FOLDER</p>
+        <input id="projectFolder" spellcheck="false" type="text" placeholder="project-name..." />
+      </div>
+      <div style="display: flex; align-items: end; width: 100%; gap: 12px; flex-direction: row;">
+      <div style="width: 25%; display: flex; gap: 4px; flex-direction: column; margin-bottom: 0px;">
+        <p>WIDTH</p>
+        <input id="widthInput" spellcheck="false" style="margin-bottom: 0px;" type="text" placeholder="768px" />
+      </div>
+      <div style="width: 25%; display: flex; gap: 4px; flex-direction: column; margin-bottom: 0px;">
+        <p>HEIGHT</p>
+        <input id="heightInput" spellcheck="false" style="margin-bottom: 0px;" type="text" placeholder="512px" />
+
+        </div>
+    <button id="createProjectBtn" style="margin: 0; text-align: center; width: 100%; align-items: center; display: flex; justify-content: center; height: 27px" type="submit">Create Project</button>
+
+</div>
+
+      </div>
+    </div>
+  </div>
+  <script>
+    document.getElementById('createProjectBtn').addEventListener('click', function() {
+      const projectName = document.getElementById('projectName').value;
+      const projectFolder = document.getElementById('projectFolder').value;
+      const width = document.getElementById('widthInput').value;
+      const height = document.getElementById('heightInput').value;
+
+      window.electron.invoke('createProject', {
+        folderPath: localStorage.getItem('kodanFolder'),
+        projectName,
+        projectFolder,
+        width,
+        height,
+      }).then(() => {
+        // Close both modal and main window after project creation
+        window.electron.send('close-modal');
+        window.electron.send('close-main-window');
+      }).catch(err => console.error('Error creating project:', err));
+    });
+    
+function updateInput(el) {
+      let value = el.value.replace(/\D/g, ''); // Remove non-numeric characters
+      el.value = value;
+      if (value) {
+        el.value += 'px';
+      }
+      el.setSelectionRange(value.length, value.length); // Set cursor at the end
+    }
+
+    function setDefaultValues() {
+      const widthInput = document.getElementById('widthInput');
+      const heightInput = document.getElementById('heightInput');
+      widthInput.value = '768px';
+      heightInput.value = '512px';
+    }
+
+    document.getElementById('widthInput').addEventListener('input', function() {
+      updateInput(this);
+    });
+
+    document.getElementById('heightInput').addEventListener('input', function() {
+      updateInput(this);
+    });
+
+    setDefaultValues(); // Set default values on page load
+    document.getElementById('projectName').addEventListener('input', function() {
+      var projectName = this.value;
+      var projectFolder = projectName
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^\w\-]/g, ''); // Optional: remove special characters
+      
+      document.getElementById('projectFolder').value = projectFolder;
+    });
+  </script>
+</body>
+</html>
