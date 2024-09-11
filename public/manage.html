@@ -239,13 +239,31 @@ function stripHTML(html) {
 
             try {
                 const modelType = currentTab === 'base-model' ? 'Checkpoint' : 'LORA';
-                const response = await fetch(`https://civitai.com/api/v1/models?types=${modelType}&nsfw=false&query=${encodeURIComponent(query)}`);
+                let apiUrl = `https://civitai.com/api/v1/models?types=${modelType}&nsfw=false`;
+                
+                if (query === '') {
+                    // Apply default filters when there's no search query
+                    apiUrl += '&tag=anime';
+                } else {
+                    apiUrl += `&query=${encodeURIComponent(query)}`;
+                }
+
+                const response = await fetch(apiUrl);
                 const data = await response.json();
 
                 // Filter out models with specific words in their names
                 const filteredItems = data.items.filter(item => {
                     const lowerCaseName = item.name.toLowerCase();
-                    return !['hentai', 'porn', 'nsfw'].some(word => lowerCaseName.includes(word));
+                    const hasBlockedWord = ['hentai', 'porn', 'nsfw'].some(word => lowerCaseName.includes(word));
+                    
+                    if (query === '') {
+                        // Apply SD 1.5 filter only when there's no search query
+                        const baseModel = item.modelVersions[0]?.baseModel;
+                        const hasSD15 = baseModel && baseModel.toLowerCase().includes('sd 1.5');
+                        return !hasBlockedWord && hasSD15;
+                    }
+                    
+                    return !hasBlockedWord;
                 });
 
                 if (filteredItems.length === 0) {
@@ -384,7 +402,14 @@ function stripHTML(html) {
                     progress.style.display = 'none';
                     progress.max = 100;
                     progress.value = 0;
-                    progress.dataset.modelName = item.name; // Add this line to set the data attribute
+                    modelName = item.name
+                    modelName = modelName.replace(/\s+/g, '_')  // Replace spaces with underscores
+    .replace(/[<>:"\/\\|?*]+/g, '')  // Remove illegal characters
+    .replace(/^\.+/, '')  // Remove leading periods
+    .trim() + ".safetensors"
+                    
+                    console.log("Model Name", modelName)
+                    progress.dataset.modelName = modelName
 
                     const updateButtonState = async () => {
                         try {
@@ -394,7 +419,7 @@ function stripHTML(html) {
                                 actionButton.onclick = () => deleteModel(item.modelVersions[0].files[0].downloadUrl, item.name, currentTab, actionButton, progress);
                             } else {
                                 actionButton.innerText = 'Download';
-                                actionButton.onclick = () => downloadModel(item.modelVersions[0].files[0].downloadUrl, item.name, modelType, actionButton, progress);                            }
+                                actionButton.onclick = () => downloadModel(item.modelVersions[0].files[0].downloadUrl, item.name, currentTab, actionButton, progress);                            }
                         } catch (error) {
                             console.error('Error checking model existence:', error);
                             actionButton.innerText = 'Error';
@@ -418,7 +443,12 @@ function stripHTML(html) {
             }
         }
 
+        let isDownloading = false;
+        let currentDownloadInfo = null;
+
         async function downloadModel(modelURL, modelName, modelType, actionButton, progressBar) {
+            isDownloading = true;
+            currentDownloadInfo = { modelURL, modelName, modelType, actionButton, progressBar };
             actionButton.disabled = true;
             progressBar.style.display = 'inline';
             actionButton.style.display = 'none';
@@ -439,12 +469,15 @@ function stripHTML(html) {
                 actionButton.disabled = false;
                 progressBar.style.display = 'none';
                 actionButton.style.display = 'inline';
+                isDownloading = false;
+                currentDownloadInfo = null;
             }
         }
 
         // Modify this event listener to update individual progress bars
         window.electron.receive('download-progress', (data) => {
             const { modelName, progress } = data;
+            console.log("DATA", data)
             const progressBar = document.querySelector(`progress[data-model-name="${modelName}"]`);
             if (progressBar) {
                 progressBar.value = progress;
@@ -505,8 +538,23 @@ function stripHTML(html) {
             fetchModels(searchInput.value);
         };
 
-        document.getElementById('closeButton').addEventListener('click', () => {
-            window.electron.closeWindow();
+        document.getElementById('closeButton').addEventListener('click', (e) => {
+            if (isDownloading && currentDownloadInfo) {
+                e.preventDefault();
+                if (confirm('A download is in progress. Closing the window will terminate the download. Are you sure you want to close?')) {
+                    const { modelURL, modelName, modelType, actionButton, progressBar } = currentDownloadInfo;
+                    deleteModel(modelURL, modelName, modelType, actionButton, progressBar)
+                        .then(() => {
+                            window.electron.closeWindow();
+                        })
+                        .catch((error) => {
+                            console.error('Error deleting model:', error);
+                            window.electron.closeWindow();
+                        });
+                }
+            } else {
+                window.electron.closeWindow();
+            }
         });
 
         window.addEventListener('download-progress', (event) => {

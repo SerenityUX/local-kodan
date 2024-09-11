@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { debounce } from 'lodash';
 import animeFacts from './animeFacts.json';
+import { Img } from 'react-image'
+import { useInterval } from 'react-use';
 
 const ProjectComponent = ({ filePath }) => {
   const [projectData, setProjectData] = useState(null);
@@ -14,14 +16,11 @@ const ProjectComponent = ({ filePath }) => {
   const [voiceText, setVoiceText] = useState('');
   const [speakerWav, setSpeakerWav] = useState('Narrator');
 
-  const [baseModel, setBaseModel] = useState('sd1.5');
+  const [baseModel, setBaseModel] = useState('');
   const [selectedLora, setSelectedLora] = useState('');
 
-  // Hardcoded LoRA modules
-  const loraModules = [
-    { name: "Ghibli Style", filePath: "./ghibli_style_offset.safetensors", compatibleModels: ["sd1.5"] },
-    { name: "Phantasma Anime", filePath: "./araminta_k_phantasma_anime.safetensors", compatibleModels: ["sdxl"] }
-  ];
+  const [baseModels, setBaseModels] = useState([]);
+  const [loraModules, setLoraModules] = useState([]);
 
   const [isGeneratingVoice, setIsGeneratingVoice] = useState(false);
   const [generateText, setGenerateText] = useState('Generate Voice');
@@ -108,6 +107,7 @@ const ProjectComponent = ({ filePath }) => {
   const [progressMap, setProgressMap] = useState({}); // Track progress for each scene
   const [progressMessageMap, setProgressMessageMap] = useState({}); // Track progress message for each scene
 
+  
   useEffect(() => {
     const intervalId = setInterval(async () => {
       if (projectData && projectData.scenes.length > 0) {
@@ -207,7 +207,7 @@ const ProjectComponent = ({ filePath }) => {
 
   useEffect(() => {
     const handleProgressUpdate = (event, sceneIndex, progressPercent) => {
-      
+
       console.log("progressP", progressPercent, "event", event, "index", sceneIndex)
       setProgressMap(prev => ({
         ...prev,
@@ -233,6 +233,11 @@ const ProjectComponent = ({ filePath }) => {
     };
   
     const handleModelResponse = (event, sceneIndex, response) => {
+      console.log("sceneIndex", sceneIndex, "response", response, "event", event)
+      if(sceneIndex.success == false && sceneIndex.message != "Process exited with code 1") {
+        alert(sceneIndex.message)
+        setCurrentlyLoading(prev => prev.filter(scene => scene !== event));
+      }
       if (response.success) {
         setProgressMessageMap(prev => ({
           ...prev,
@@ -296,8 +301,10 @@ const ProjectComponent = ({ filePath }) => {
         setNegativePrompt(currentScene.negativePrompt || '');
         setVoiceText(currentScene.voiceline || '');
         setSpeakerWav(currentScene.speaker || 'Narrator');
-        setBaseModel(currentScene.baseModel || 'sd1.5');
-        setSelectedLora(currentScene.selectedLora || '');
+        fetchBaseModels()
+        fetchLoraModules()
+        setBaseModel(currentScene.baseModel || baseModels[0]);
+        setSelectedLora(currentScene.selectedLora || loraModules[0]);
         
         // Load caption settings
         setCaptionSettings(prevSettings => ({
@@ -577,6 +584,8 @@ const handleSpeakerChange = async (event) => {
   };
 
   useEffect(() => {
+    fetchBaseModels()
+    fetchLoraModules()
     if (projectData && projectData.scenes[selectedScene - 1]) {
       setIsTransitioning(true);
       const currentScene = projectData.scenes[selectedScene - 1];
@@ -605,7 +614,25 @@ const handleSpeakerChange = async (event) => {
     }
   }, [selectedScene, projectData]);
 
-  const handleBaseModelChange = (event) => {
+  const fetchBaseModels = useCallback(async () => {
+    try {
+      const models = await window.electron.ipcRenderer.invoke('get-base-models');
+      setBaseModels(models);
+    } catch (error) {
+      console.error('Failed to fetch base models:', error);
+    }
+  }, []);
+
+  const fetchLoraModules = useCallback(async () => {
+    try {
+      const modules = await window.electron.ipcRenderer.invoke('get-lora-modules');
+      setLoraModules(modules);
+    } catch (error) {
+      console.error('Failed to fetch LoRA modules:', error);
+    }
+  }, []);
+
+  const handleBaseModelChange = async (event) => {
     const newBaseModel = event.target.value;
     if (newBaseModel === 'manage') {
       window.electron.ipcRenderer.send('open-manage-window', 'baseModel');
@@ -615,7 +642,7 @@ const handleSpeakerChange = async (event) => {
     }
   };
 
-  const handleLoraChange = (event) => {
+  const handleLoraChange = async (event) => {
     const newSelectedLora = event.target.value;
     if (newSelectedLora === 'manage') {
       window.electron.ipcRenderer.send('open-manage-window', 'lora');
@@ -702,6 +729,49 @@ const handleSpeakerChange = async (event) => {
     }
   };
 
+  const [thumbnailTimestamps, setThumbnailTimestamps] = useState({});
+
+  const getFileLastModified = async (path) => {
+    try {
+      const lastModified = await window.electron.ipcRenderer.invoke('check-file-updated', path);
+      return lastModified;
+    } catch (error) {
+      console.error('Error getting file last modified time:', error);
+      return null;
+    }
+  };
+
+  useInterval(() => {
+    if (projectData && projectData.scenes) {
+      projectData.scenes.forEach(async (scene, index) => {
+        const lastModified = await getFileLastModified(scene.thumbnail);
+        if (lastModified) {
+          setThumbnailTimestamps(prev => ({
+            ...prev,
+            [index + 1]: lastModified
+          }));
+        }
+      });
+    }
+  }, 1000);
+
+  useEffect(() => {
+    const handleImageGenerationError = (event, data) => {
+      alert(`Image generation failed: ${data.errorMessage}`);
+      setCurrentlyLoading(prev => prev.filter(scene => scene !== data.sceneIndex));
+      setGenerateImageText(prev => ({
+        ...prev,
+        [data.sceneIndex]: 'Generate Visuals'
+      }));
+    };
+
+    window.electron.on('image-generation-error', handleImageGenerationError);
+
+    return () => {
+      window.electron.off('image-generation-error', handleImageGenerationError);
+    };
+  }, []);
+
   return (
     <div style={{ height: '100%', width: "100%", display: 'flex', flexDirection: 'column', fontFamily: 'Arial, sans-serif', margin: 0, padding: 0, alignItems: 'center', justifyContent: 'space-between' }}>
 <div style={{width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", height: 45, backgroundColor: "#fff", borderBottom: "1px solid #D9D9D9", WebkitAppRegion: "drag"}}>
@@ -762,36 +832,40 @@ const handleSpeakerChange = async (event) => {
       <div style={{ width: '274px', justifyContent: "space-between", display: "flex", gap: "12px", paddingTop:  "0px", paddingBottom: "9px", flexDirection: "column" }} id="left-bar">
           <div style={{display: "flex", gap: 12, overflowY: "scroll", flexDirection: "column",  paddingTop:  "12px"}}>
           <div style={{display: "flex", flexDirection: "column", gap: 12}}>
-          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}>          <img src="icons/Picture.svg"/>Style</p>
-          <div style={{display: "flex", flexDirection: "column", gap: 4}}>
-  <p style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}>BASE MODEL</p>
-  <select 
-    value={baseModel}
-    onChange={handleBaseModelChange}
-    style={{
-      width: "calc(100% - 24px)", 
-      marginLeft: 12, 
-      appearance: "none",
-      marginRight: 12,
-      padding: "4px 4px",
-      border: "1px solid #D9D9D9",
-      borderRadius: "4px",
-      backgroundColor: "#fff",
-      fontSize: "14px",
-      color: "#404040"
-    }}
-  >
-    <option value="sd1.5">Stable Diffusion 1.5</option>
-    <option value="sdxl">SDXL</option>
-    <option value="manage">Manage Base Models</option>
-  </select>
-</div>
+          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}>          <Img src="icons/Picture.svg"/>Style</p>
+          <div style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
+            <p style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}>BASE MODEL</p>
+            <select 
+              value={baseModel}
+              onChange={handleBaseModelChange}
+              onClick={fetchBaseModels}
+              style={{
+                width: "calc(100% - 24px)", 
+                marginLeft: 12, 
+                appearance: "none",
+                marginRight: 12,
+                padding: "4px 4px",
+                border: "1px solid #D9D9D9",
+                borderRadius: "4px",
+                backgroundColor: "#fff",
+                fontSize: "14px",
+                color: "#404040"
+              }}
+            >
+              {baseModels.length == 0 && <option>Select Base Model</option>}
+              {baseModels.map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+              <option value="manage">Manage Base Models</option>
+            </select>
+          </div>
 
 <div style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
   <p style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}>LORA MODULE</p>
   <select 
     value={selectedLora}
     onChange={handleLoraChange}
+    onClick={fetchLoraModules}
     style={{
       width: "calc(100% - 24px)", 
       marginLeft: 12, 
@@ -805,19 +879,18 @@ const handleSpeakerChange = async (event) => {
       color: "#404040"
     }}
   >
-    {loraModules
-      .filter(module => module.compatibleModels.includes(baseModel))
-      .map(module => (
-        <option key={module.filePath} value={module.filePath}>
-          {module.name}
-        </option>
-      ))}
+       {loraModules.length == 0 && <option>Select LoRa</option>}
+
+    {loraModules.map((module) => (
+      <option key={module} value={module}>{module}</option>
+    ))}    
+
     <option value="manage">Manage LoRa Modules</option>
   </select>
 </div>
           </div>
           <div style={{width: "100%", height: "1px", backgroundColor: "#D9D9D9"}}></div>
-          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}><img src="icons/Prompt.svg"/>Prompt</p>
+          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}><Img src="icons/Prompt.svg"/>Prompt</p>
           <div style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
             <p style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}>POSITIVE PROMPT</p>
             <textarea
@@ -869,7 +942,7 @@ const handleSpeakerChange = async (event) => {
           </div>
           {sceneDuration !== null && (
 <>          <div style={{width: "100%", height: "1px", backgroundColor: "#D9D9D9"}}></div>
-          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}><img src="icons/clipDuration.svg"/>Duration</p>
+          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}><Img src="icons/clipDuration.svg"/>Duration</p>
             <p style={{fontSize: 14, color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 12}}>
               {sceneDuration.toFixed(2)} seconds
             </p>
@@ -892,10 +965,10 @@ const handleSpeakerChange = async (event) => {
               marginLeft: 12,
               marginRight: 12,
               fontSize: 13.3,
-              cursor: currentlyLoading.includes(selectedScene) ? "not-allowed" : "pointer",
-              opacity: currentlyLoading.includes(selectedScene) ? 0.6 : 1
+              cursor: prompt == "" || currentlyLoading.includes(selectedScene) || (baseModels.length == 0 && loraModules.length == 0) ? "not-allowed" : "pointer",
+              opacity: prompt == "" || currentlyLoading.includes(selectedScene) || (baseModels.length == 0 && loraModules.length == 0) ? 0.6 : 1
             }}
-            disabled={currentlyLoading.includes(selectedScene)}
+            disabled={prompt == "" || currentlyLoading.includes(selectedScene) || (baseModels.length == 0 && loraModules.length == 0)}
           >
             {generateImageText[selectedScene] || 'Generate Visuals'}
           </button>
@@ -931,7 +1004,7 @@ const handleSpeakerChange = async (event) => {
                   }}
                 />
               ) : (
-                <img
+                <Img
                   src={thumbnail}
                   alt="Thumbnail"
                   style={{
@@ -995,7 +1068,7 @@ const handleSpeakerChange = async (event) => {
                         />
                       </div>
                     </div> 
-                    <button disabled={prompt == ""} style={{marginTop: 24, cursor: "pointer", border: "1px solid #D9D9D9", paddingTop: 8, paddingBottom: 8, backgroundColor:  "#fff", color: "#404040", fontSize: 16, width: "100%", borderRadius: "6px"}} onClick={() => {
+                    <button disabled={prompt == "" || (baseModels.length == 0 && loraModules.length == 0)} style={{marginTop: 24, cursor: "pointer", border: "1px solid #D9D9D9", paddingTop: 8, paddingBottom: 8, backgroundColor:  "#fff", color: "#404040", fontSize: 16, width: "100%", borderRadius: "6px"}} onClick={() => {
                       startGenerationForScene(selectedScene);
                     }}>Generate Visuals</button>
                   </div>) : (
@@ -1058,7 +1131,7 @@ const handleSpeakerChange = async (event) => {
         <div style={{ width: '274px', display: "flex", gap: "12px", paddingTop:  "12px", paddingBottom: "16px", flexDirection: "column" }} id="right-bar">
           
 
-          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}>          <img src="icons/caption.svg"/>Caption</p>
+          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}>          <Img src="icons/caption.svg"/>Caption</p>
           <div style={{display: "flex", flexDirection: "row", gap: 8, marginLeft: 12, marginRight: 12}}>
             <select 
               value={captionSettings.selectedFont}
@@ -1219,7 +1292,7 @@ const handleSpeakerChange = async (event) => {
             </div>
           </div>
           <div style={{width: "100%", height: "1px", backgroundColor: "#D9D9D9"}}></div>
-          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}><img src="icons/export.svg"/>Export Clip</p>
+          <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}><Img src="icons/export.svg"/>Export Clip</p>
 
           <button 
             onClick={handleExportClip}
@@ -1282,7 +1355,7 @@ const handleSpeakerChange = async (event) => {
           >
             {(!deletingScenes.has(selectedScene) && !currentlyLoading.includes(selectedScene) || thumbnail != null) && (
               <>
-                <img 
+                <Img 
                   onClick={(e) => {
                     e.stopPropagation();
                     handleDeleteScene(index);
@@ -1300,7 +1373,7 @@ const handleSpeakerChange = async (event) => {
                   }} 
                   src="./icons/Minus.svg"
                 />
-                {canExportClip && <img 
+                {canExportClip && <Img 
                   onClick={(e) => {
                     e.stopPropagation();
                     handleOpenFolder(index + 1);
@@ -1320,24 +1393,39 @@ const handleSpeakerChange = async (event) => {
                 />}
               </>
             )}
-            <img
-              style={{
-                aspectRatio,
-                borderRadius: '12px',
-                maxHeight: '100%',
-                display: 'flex',
-                backgroundColor: '#fff',
-                objectFit: 'cover',
-                transition: "opacity 0.1s ease-out, transform 0.1s ease-out",
-                opacity: (pressedScene === index + 1 && isMouseDown) || (selectedScene === index + 1 && pressedScene === selectedScene) ? 0.7 : 1,
-                transform: `scale(${(pressedScene === index + 1 && isMouseDown) || (selectedScene === index + 1 && pressedScene === selectedScene) ? 0.95 : 1})`
-              }}
-              src={item.thumbnail ? `${item.thumbnail}?${new Date().getTime()}` : ''}
-              alt="" 
-              onError={(e) => {
-                e.target.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='; 
-              }}
-            />
+        <Img
+          src={`${item.thumbnail}?t=${thumbnailTimestamps[index + 1] || ''}`}
+          loader={
+            <div style={{
+              aspectRatio,
+              borderRadius: '12px',
+              maxHeight: '100%',
+              width: '100%',
+              backgroundColor: '#F2F2F2',
+            }} />
+          }
+          unloader={
+            <div style={{
+              aspectRatio,
+              borderRadius: '12px',
+              maxHeight: '100%',
+              transition: "opacity 0.1s ease-out, width 0.3s ease-out, transform 0.1s ease-out",
+              width: '100%',
+              backgroundColor: '#F2F2F2',
+            }} />
+          }
+          style={{
+            aspectRatio,
+            borderRadius: '12px',
+            maxHeight: '100%',
+            display: 'flex',
+            backgroundColor: '#fff',
+            objectFit: 'cover',
+            transition: "opacity 0.1s ease-out, width 0.3s ease-out, transform 0.1s ease-out",
+            opacity: (pressedScene === index + 1 && isMouseDown) || (selectedScene === index + 1 && pressedScene === selectedScene) ? 0.7 : 1,
+            transform: `scale(${(pressedScene === index + 1 && isMouseDown) || (selectedScene === index + 1 && pressedScene === selectedScene) ? 0.95 : 1})`
+          }}
+        />
           </div>
         ))}
         <div
@@ -1376,7 +1464,7 @@ const handleSpeakerChange = async (event) => {
               transition: "opacity 0.1s ease-out, transform 0.1s ease-out"
             }}
           >
-            <img src='./icons/Plus.svg' style={{ width: '32px', height: '32px' }} alt="Add Item" />
+            <Img src='./icons/Plus.svg' style={{ width: '32px', height: '32px' }} alt="Add Item" />
           </div>
         </div>
       </div>

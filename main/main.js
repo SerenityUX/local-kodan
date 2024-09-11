@@ -1,6 +1,6 @@
 const { app, shell, BrowserWindow, nativeImage, ipcMain, screen, dialog } = require('electron');
 const path = require('path');
-const fs = require('fs');
+const fs = require('fs-extra');
 const { exec, spawn } = require('child_process');
 const fontkit = require('fontkit');
 const glob = require('glob');
@@ -11,6 +11,21 @@ const http = require('http');
 const fetch = require('node-fetch');
 
 let rootFolder
+
+function getResourcePath(filename) {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, filename)
+    : path.join(__dirname, '..', filename);
+}
+
+const venvPath = getResourcePath('venv');
+const runModelPath = getResourcePath('run_model.py');
+const voicePath = getResourcePath('voice.py');
+const generateCaptionPath = getResourcePath('generate_caption.py');
+const renderClipPath = getResourcePath('renderClip.py');
+const renderProjectPath = getResourcePath('renderProject.py');
+
+
 
 let manageWindow;
 
@@ -147,10 +162,23 @@ for (let i = 0; i < 256; i++) {
 ipcMain.handle('checkModelExists', async (event, modelName, modelType) => {
   const modelsDir = path.join(rootFolder, 'Models');
   const modelDir = modelType === 'base-model' ? 'Base-Models' : 'LoRA';
-  const modelPath = path.join(modelsDir, modelDir, modelName);
+  
+  // Clean up the filename: replace spaces with underscores and remove illegal characters
+  let safeModelName = modelName
+    .replace(/\s+/g, '_')  // Replace spaces with underscores
+    .replace(/[<>:"\/\\|?*]+/g, '')  // Remove illegal characters
+    .replace(/^\.+/, '')  // Remove leading periods
+    .trim();
+
+  // Ensure the filename ends with .safetensors
+  if (!safeModelName.toLowerCase().endsWith('.safetensors')) {
+    safeModelName += '.safetensors';
+  }
+
+  const modelPath = path.join(modelsDir, modelDir, safeModelName);
   
   try {
-    await fs.promises.access(modelPath);
+    await fs.promises.access(modelPath, fs.constants.F_OK);
     return true;
   } catch {
     return false;
@@ -159,20 +187,52 @@ ipcMain.handle('checkModelExists', async (event, modelName, modelType) => {
 
 const downloads = new Map();
 
-async function downloadFromCivitai(apiUrl, modelPath) {
+ipcMain.handle('startDownload', async (event, modelURL, modelName, modelType) => {
   try {
-    console.log('Fetching:', apiUrl);
-    const response = await fetch(apiUrl, {
+    const modelsDir = path.join(rootFolder, 'Models');
+    const modelDir = modelType == 'base-model' ? 'Base-Models' : 'LoRA';
+    let modelFolder = path.join(modelsDir, modelDir);
+
+    // Ensure the directory exists
+    fs.mkdirSync(modelFolder, { recursive: true });
+
+    const downloadId = Date.now().toString(); // Create a unique download ID
+    downloads.set(downloadId, 0); // Initialize progress to 0
+
+    let modelPath = await downloadFromCivitai(modelURL, modelFolder, downloadId, modelName);
+
+    downloads.delete(downloadId); // Remove the download from the map when complete
+
+    return { success: true, path: modelPath };
+  } catch (error) {
+    console.error('Download failed:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+async function downloadFromCivitai(apiUrl, modelFolder, downloadId, modelName) {
+  try {
+    const response = await fetch(apiUrl + "?token=fb503c54644270e19f0334586fb538d9", {
       redirect: 'follow',
     });
-
-    console.log('Response status:', response.status);
-    console.log('Response headers:', response.headers);
 
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
+    // Clean up the filename: replace spaces with underscores and remove illegal characters
+    let filename = modelName
+      .replace(/\s+/g, '_')  // Replace spaces with underscores
+      .replace(/[<>:"\/\\|?*]+/g, '')  // Remove illegal characters
+      .replace(/^\.+/, '')  // Remove leading periods
+      .trim();
+
+    // Ensure the filename ends with .safetensors
+    if (!filename.toLowerCase().endsWith('.safetensors')) {
+      filename += '.safetensors';
+    }
+
+    const modelPath = path.join(modelFolder, filename);
     const totalBytes = parseInt(response.headers.get('content-length'), 10);
     let downloadedBytes = 0;
 
@@ -182,8 +242,11 @@ async function downloadFromCivitai(apiUrl, modelPath) {
       response.body.on('data', (chunk) => {
         downloadedBytes += chunk.length;
         const progress = totalBytes ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+        
+        console.log(filename, progress)
+        downloads.set(filename, progress);
         BrowserWindow.getAllWindows().forEach(window => {
-          window.webContents.send('download-progress', progress);
+          window.webContents.send('download-progress', {modelName: filename, progress: progress}, progress);
         });
       });
 
@@ -191,7 +254,7 @@ async function downloadFromCivitai(apiUrl, modelPath) {
 
       fileStream.on('finish', () => {
         fileStream.close();
-        resolve();
+        resolve(modelPath);
       });
 
       fileStream.on('error', (err) => {
@@ -204,47 +267,6 @@ async function downloadFromCivitai(apiUrl, modelPath) {
   }
 }
 
-ipcMain.handle('startDownload', async (event, modelURL, modelName, modelType) => {
-  try {
-    const modelsDir = path.join(rootFolder, 'Models');
-    const modelDir = modelType === 'base-model' ? 'Base-Models' : 'LoRA';
-    const modelPath = path.join(modelsDir, modelDir, modelName);
-
-    // Ensure the directory exists
-    fs.mkdirSync(path.dirname(modelPath), { recursive: true });
-
-    const apiUrl = modelURL;
-
-    const response = await fetch(apiUrl, { redirect: 'follow' });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const totalBytes = parseInt(response.headers.get('content-length'), 10);
-    let downloadedBytes = 0;
-
-    const fileStream = fs.createWriteStream(modelPath);
-    
-    response.body.on('data', (chunk) => {
-      downloadedBytes += chunk.length;
-      const progress = totalBytes ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
-      event.sender.send('download-progress', { modelName, progress });
-    });
-
-    await new Promise((resolve, reject) => {
-      response.body.pipe(fileStream);
-      fileStream.on('finish', resolve);
-      fileStream.on('error', reject);
-    });
-
-    return { success: true, path: modelPath };
-  } catch (error) {
-    console.error('Download failed:', error);
-    return { success: false, error: error.message };
-  }
-});
-
 ipcMain.handle('getDownloadProgress', (event, downloadId) => {
     return downloads.get(downloadId) || 0;
 });
@@ -252,27 +274,35 @@ ipcMain.handle('getDownloadProgress', (event, downloadId) => {
 async function deleteModel(modelName, modelType, rootFolder) {
   const modelsDir = path.join(rootFolder, 'Models');
   const modelDir = modelType === 'base-model' ? 'Base-Models' : 'LoRA';
-  const modelPath = path.join(modelsDir, modelDir, modelName);
+
+  // Clean up the filename: replace spaces with underscores and remove illegal characters
+  let safeModelName = modelName
+    .replace(/\s+/g, '_')  // Replace spaces with underscores
+    .replace(/[<>:"\/\\|?*]+/g, '')  // Remove illegal characters
+    .replace(/^\.+/, '')  // Remove leading periods
+    .trim();
+
+  // Ensure the filename ends with .safetensors
+  if (!safeModelName.toLowerCase().endsWith('.safetensors')) {
+    safeModelName += '.safetensors';
+  }
+
+  const modelPath = path.join(modelsDir, modelDir, safeModelName);
 
   try {
-    // Delete the file or directory and its contents
-    await fs.promises.rm(modelPath, { recursive: true, force: true });
-
-    // Check if the parent directory is empty, and delete it if so
-    let currentDir = path.dirname(modelPath);
-    while (currentDir !== path.join(modelsDir, modelDir)) {
-      const items = await fs.promises.readdir(currentDir);
-      if (items.length === 0) {
-        await fs.promises.rmdir(currentDir);
-        currentDir = path.dirname(currentDir);
-      } else {
-        break;
-      }
-    }
-
-    console.log(`Model and empty parent directories deleted successfully up to ${modelDir}`);
+    // Check if the file exists before attempting to delete
+    await fs.promises.access(modelPath, fs.constants.F_OK);
+    
+    // Delete the file
+    await fs.promises.unlink(modelPath);
+    console.log(`Model deleted successfully: ${modelPath}`);
     return true;
   } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.error(`Model file not found: ${modelPath}`);
+      // You might want to return false or throw a specific error here
+      return false;
+    }
     console.error(`Error deleting model: ${error}`);
     throw error;
   }
@@ -280,7 +310,6 @@ async function deleteModel(modelName, modelType, rootFolder) {
 
 ipcMain.handle('deleteModel', async (event, modelName, modelType) => {
   try {
-    console.log(modelName, modelType, rootFolder)
     await deleteModel(modelName, modelType, rootFolder);
     return { success: true };
   } catch (error) {
@@ -292,7 +321,7 @@ ipcMain.handle('deleteModel', async (event, modelName, modelType) => {
 
 ipcMain.handle('get-voices', (event) => {
   return new Promise((resolve, reject) => {
-    const voicesPath = path.join(__dirname, '..', 'Voices');
+    const voicesPath = path.join(rootFolder, 'Voices');
     fs.readdir(voicesPath, (err, files) => {
       if (err) {
         console.error('Error reading voices directory:', err);
@@ -307,7 +336,7 @@ ipcMain.handle('get-voices', (event) => {
   });
 });
 
-ipcMain.handle('add-voice', async () => {
+ipcMain.handle('add-voice', async (event) => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     filters: [{ name: 'WAV', extensions: ['wav'] }]
@@ -316,7 +345,7 @@ ipcMain.handle('add-voice', async () => {
   if (!result.canceled && result.filePaths.length > 0) {
     const sourcePath = result.filePaths[0];
     const fileName = path.basename(sourcePath);
-    const destPath = path.join(__dirname, '..', 'Voices', fileName);
+    const destPath = path.join(rootFolder, 'Voices', fileName);
 
     return new Promise((resolve) => {
       fs.copyFile(sourcePath, destPath, (err) => {
@@ -324,7 +353,7 @@ ipcMain.handle('add-voice', async () => {
           console.error('Error copying voice file:', err);
           resolve(false);
         } else {
-          resolve(true);
+          resolve(fileName);
         }
       });
     });
@@ -392,10 +421,10 @@ ipcMain.handle('render-project', async (event, projectFolder) => {
       return;
     }
 
-    const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
+    // const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
 
     // Command to activate the virtual environment and run renderProject.py with the selected file path
-    const activateAndRun = `source ${venvPath}/bin/activate && python3 renderProject.py "${projectFolder}" "${filePath}"`;
+    const activateAndRun = `source ${venvPath}/bin/activate && python3 ${renderProjectPath} "${projectFolder}" "${filePath}"`;
 
     // Execute the script
     exec(activateAndRun, (error, stdout, stderr) => {
@@ -500,11 +529,25 @@ function createModalWindow() {
 }
 
 
+function ensureVoicesDirectory(projectRootPath) {
+  const voicesDir = path.join(projectRootPath, 'Voices');
+  if (!fs.existsSync(voicesDir)) {
+    fs.mkdirSync(voicesDir, { recursive: true });
+    
+    // Copy default Narrator.wavf
+    const defaultNarratorPath = path.join(__dirname, '..', 'Voices', 'Narrator.wav');
+    const newNarratorPath = path.join(voicesDir, 'Narrator.wav');
+    fs.copyFileSync(defaultNarratorPath, newNarratorPath);
+  }
+}
+
 
   
 function createProjectWindow(projectFilePath) {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   rootFolder = projectFilePath.split("/Projects")[0]
+  
+  ensureVoicesDirectory(rootFolder)
   const projectWindow = new BrowserWindow({
     width,
     height,
@@ -711,12 +754,12 @@ ipcMain.handle('add-new-scene', async (event, projectFilePath, aspectRatio) => {
 
 
 app.whenReady().then(() => {
-  app.setAppUserModelId('com.serenidad.kodan'); // Optional for Windows, doesn't impact macOS
+  // app.setAppUserModelId('com.serenidad.kodan'); // Optional for Windows, doesn't impact macOS
 
-  const image = nativeImage.createFromPath('./KodanFlower.icns');
-  app.dock.setIcon(image);  
+  // const image = nativeImage.createFromPath('./KodanFlower.icns');
+  // app.dock.setIcon(image);  
   createWindow()
-  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('use-angle', 'metal');  // Use Metal for rendering on Apple Silicon
   process.env.PYTORCH_ENABLE_MPS_FALLBACK = "1";
 
 
@@ -727,9 +770,9 @@ let lastNumber = 0
 
 
 function renderClip(projectPath, sceneNumber) {
-  const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
+  // const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
 
-  const activateAndRun = `source ${venvPath}/bin/activate && python3 renderClip.py "${projectPath}" "${sceneNumber}"`;
+  const activateAndRun = `source ${venvPath}/bin/activate && python3 ${renderClipPath} "${projectPath}" "${sceneNumber}"`;
 
   const process = exec(activateAndRun);
 
@@ -773,16 +816,20 @@ ipcMain.on('run-voice-model', (event, arg) => {
   const sceneNumber = parseInt(arg.outputLocation.split("Voicelines/")[1].split(".mp3")[0]);
   generatingVoicelines.add(sceneNumber);
 
-  const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
+  // const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
   const outputLocation = arg.outputLocation;
   const prompt = arg.prompt;
   const maxLength = arg.maxLength || 250;
-  const speakerWav = `./Voices/${arg.speakerWav}.wav` || "./Voices/Narrator.wav";
+  const projectPath = arg.outputLocation.split("/Voicelines")[0];
+  const voicesDir = path.join(rootFolder, 'Voices');
+  const speakerWav = path.join(voicesDir, `${arg.speakerWav}.wav`);
   const language = arg.language || "en";
 
-  const projectPath = arg.outputLocation.split("/Voicelines")[0];
+  // Ensure the speaker WAV file exists, otherwise use Narrator.wav
+  const defaultNarratorPath = path.join(voicesDir, 'Narrator.wav');
+  const finalSpeakerWav = fs.existsSync(speakerWav) ? speakerWav : defaultNarratorPath;
 
-  const activateAndRun = `source ${venvPath}/bin/activate && python3 -u voice.py "${prompt}" "${outputLocation}" ${maxLength} "${speakerWav}" "${language}"`;
+  const activateAndRun = `source ${venvPath}/bin/activate && python3 -u ${voicePath} "${prompt}" "${outputLocation}" ${maxLength} "${finalSpeakerWav}" "${language}"`;
 
   const process = exec(activateAndRun);
 
@@ -834,6 +881,8 @@ ipcMain.on('run-voice-model', (event, arg) => {
     event.sender.send('voice-generation-status', { sceneNumber, isGenerating: false });
   });
 });
+
+
 ipcMain.on('close-window', () => {
   const window = BrowserWindow.getFocusedWindow();
   if (window) window.close();
@@ -846,27 +895,25 @@ ipcMain.handle('open-external-link', (event, url) => {
 });
 ipcMain.on('run-model', (event, arg) => {
   playFlute()
-  const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
+  // const venvPath = path.join(__dirname, '../venv');
   const outputPath = arg.outputPath;
   const aspectRatio = arg.aspectRatio;
   const prompt = arg.prompt;
   const negativePrompt = arg.negativePrompt;
   const width = arg.width;
   const height = arg.height;
-  const sceneIndex = arg.sceneIndex; // Track which scene is being processed
-  const baseModel = arg.baseModel; // New argument for base model
-  const selectedLora = arg.selectedLora; // New argument for LoRA module
+  const sceneIndex = arg.sceneIndex;
+  const baseModel = arg.baseModel;
+  const loraModule = arg.loraModule;
 
-  const projectPath = arg.outputPath.split("/thumbnail.png")[0]
-  console.log("project path", projectPath)
+  const projectPath = arg.outputPath.split("/Images")[0];
+  const rootFolder = projectPath.split("/Projects")[0];
+  console.log("root folder", rootFolder);
 
-  const runModelPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'run_model.py')
-    : path.join(__dirname, '..', 'run_model.py');
 
-  // Use app.whenReady() to ensure process is available
   app.whenReady().then(() => {
-    const activateAndRun = `source ${venvPath}/bin/activate && python3 -u "${runModelPath}" "${outputPath}" ${aspectRatio} "${prompt}" "${negativePrompt}" ${width} ${height} "${baseModel}"`;
+    const activateAndRun = `source ${venvPath}/bin/activate && python3 -u "${runModelPath}" "${outputPath}" ${aspectRatio} "${prompt}" "${negativePrompt}" ${width} ${height} "${baseModel}" "${loraModule}" "${rootFolder}"`;
+    let stderrBuffer = Buffer.from(''); // Define stderrBuffer here
 
     const process = exec(activateAndRun);
 
@@ -876,45 +923,48 @@ ipcMain.on('run-model', (event, arg) => {
       if (!isProcessClosed) {
         data.split('\n').forEach(line => {
           const trimmedLine = line.trim();
-
-          // Match progress lines only
-          const progressBarMatch = trimmedLine.match(/^(\d+)%\|/);
-          const progressCustomMatch = trimmedLine.match(/PROGRESS: (\d+)\/(\d+)/);
-
-          if (progressBarMatch) {
-            const progressPercent = parseInt(progressBarMatch[1], 10);
+          console.log('stdout here:', trimmedLine);
+    
+          
+          // Match progress lines
+          const progressMatch = trimmedLine.match(/ge:\s*(\d+)%\|/);
+          
+          if (progressMatch) {
+            const progressPercent = parseInt(progressMatch[1], 10);
             if (!isNaN(progressPercent)) {
               console.log(`Progress for scene ${sceneIndex}:`, progressPercent);
               event.sender.send('progress-update', sceneIndex, progressPercent);
             }
-          } else if (progressCustomMatch) {
-            const currentStep = parseInt(progressCustomMatch[1], 10);
-            const totalSteps = parseInt(progressCustomMatch[2], 10);
-            if (!isNaN(currentStep) && !isNaN(totalSteps) && totalSteps > 0) {
-              const progressPercent = Math.round((currentStep / totalSteps) * 100);
-              console.log(`Progress for scene ${sceneIndex}:`, progressPercent);
-              event.sender.send('progress-update', sceneIndex, progressPercent);
-            }
-          } else if (!isNaN(trimmedLine)) {
-            // Handle cases where a number is received without a percentage symbol
-            const progressPercent = parseInt(trimmedLine, 10);
-            if (!isNaN(progressPercent)) {
-              console.log(`Progress for scene ${sceneIndex}:`, progressPercent);
-              event.sender.send('progress-update', sceneIndex, progressPercent);
-            }
-          } else {
-            console.warn('Non-progress data:', trimmedLine);
           }
         });
       }
     });
-
     process.stderr.on('data', (data) => {
       if (!isProcessClosed) {
-        // You may want to handle stderr data similarly
-        console.warn(`stderr for scene ${sceneIndex}:`, data.toString());
+        stderrBuffer += data.toString(); // Accumulate stderr output
+
+        data.split('\n').forEach(line => {
+          const trimmedLine = line.trim();
+          console.log('stdout here:', trimmedLine);
+    
+          // Match progress lines with a more flexible regex
+          const progressMatch = trimmedLine.match(/ge:\s*(\d+)%\|/);
+          
+          if (progressMatch) {
+            const progressPercent = parseInt(progressMatch[1], 10);
+            if (!isNaN(progressPercent)) {
+              console.log(`Progress for scene ${sceneIndex}:`, progressPercent);
+              event.sender.send('progress-update', sceneIndex, progressPercent);
+            }
+          }
+        });
       }
     });
+    // process.stderr.on('data', (data) => {
+    //   if (!isProcessClosed) {
+    //     console.warn(`stderr for scene ${sceneIndex}:`, data.toString());
+    //   }
+    // });
 
     process.on('close', async (code) => {
       isProcessClosed = true;
@@ -923,22 +973,42 @@ ipcMain.on('run-model', (event, arg) => {
 
       if (code === 0) {
         try {
-          // Load the project data to get the caption settings
-          const projectData = JSON.parse(fs.readFileSync(outputPath?.split("/Images")[0], 'utf-8'));
+          const projectData = JSON.parse(fs.readFileSync(projectPath + "/project.kodan", 'utf-8'));
           const scene = projectData.scenes[sceneIndex - 1];
           const captionSettings = scene.captionSettings || {};
 
-          // Call update-caption
-
-          await ipcMain.handle('update-caption', event, outputPath?.split("/Images")[0] + "./project.kodan", sceneIndex, captionSettings);
+          await ipcMain.handle('update-caption', event, projectPath + "/project.kodan", sceneIndex, captionSettings);
           
           console.log(`Caption updated for scene ${sceneIndex}`);
         } catch (error) {
           console.error(`Error updating caption for scene ${sceneIndex}:`, error);
         }
+      } else {
+        // Handle the error case
+        let errorMessage = `Image generation failed for scene ${sceneIndex}. Please check your inputs and try again.`;
+        console.log(errorMessage)
+        // Check if there's a specific error message in the stderr
+        const stderrContent = stderrBuffer.toString().trim();
+        if (stderrContent) {
+          errorMessage = `Image generation failed: ${stderrContent}`;
+        }
+
+        event.sender.send('run-model-response', sceneIndex, {
+          success: false,
+          message: errorMessage,
+        });
+
+        // Send an additional event to notify the renderer process about the error
+        event.sender.send('image-generation-error', {
+          sceneIndex,
+          errorMessage,
+        });
       }
 
-      checkAndRenderClip(projectPath.split("/Images")[0], sceneIndex);
+          // Add this to capture stderr output
+
+
+      checkAndRenderClip(projectPath, sceneIndex);
 
       event.sender.send('run-model-response', sceneIndex, {
         success: code === 0,
@@ -1078,6 +1148,31 @@ ipcMain.handle('select-folder', async () => {
   }
 });
 
+ipcMain.handle('get-base-models', async () => {
+  try {
+    const baseModelsDir = path.join(rootFolder, 'Models', 'Base-Models');
+    console.log(baseModelsDir)
+    const files = await fs.promises.readdir(baseModelsDir);
+    console.log(files)
+
+    return files.filter(file => file.endsWith('.safetensors') || file.endsWith('.ckpt'));
+  } catch (error) {
+    console.error('Error fetching base models:', error);
+    return [];
+  }
+});
+
+ipcMain.handle('get-lora-modules', async () => {
+  try {
+    const loraModulesDir = path.join(rootFolder, 'Models', 'LoRA');
+    const files = await fs.promises.readdir(loraModulesDir);
+    return files.filter(file => file.endsWith('.safetensors') || file.endsWith('.ckpt'));
+  } catch (error) {
+    console.error('Error fetching LoRA modules:', error);
+    return [];
+  }
+});
+
 ipcMain.handle('get-project-data', async (event, folderPath) => {
   const projectsPath = path.join(folderPath, 'Projects');
   if (!fs.existsSync(projectsPath)) {
@@ -1209,8 +1304,8 @@ ipcMain.handle('update-caption', async (event, projectFilePath, sceneIndex, capt
     const scene = projectData.scenes[sceneIndex - 1];
      
     if (scene && scene.thumbnail && fs.existsSync(scene.thumbnail)) {
-      const venvPath = path.join(__dirname, '../venv');
-      const scriptPath = path.join(__dirname, '../generate_caption.py');
+      // const venvPath = path.join(__dirname, '../venv');
+      const scriptPath = generateCaptionPath;
       
       // Create raw image path
       const rawImagePath = scene.thumbnail.replace('.png', '_raw.png');

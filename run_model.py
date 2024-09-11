@@ -1,14 +1,15 @@
 import torch
-from diffusers import StableDiffusionPipeline, DiffusionPipeline
+from diffusers import StableDiffusionPipeline, DiffusionPipeline, FluxPipeline
+from diffusers.models import FluxTransformer2DModel
 import argparse
 from tqdm import tqdm
 import os
 import shutil
 from torchvision import transforms
+from huggingface_hub import login
+login(token="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")
 
-def generate_flower_image(output_file, aspect_ratio, prompt, negativePrompt, width, height, base_model):
-    cache_dir = "./model_cache"
-
+def generate_flower_image(output_file, aspect_ratio, prompt, negativePrompt, width, height, base_model, lora_model, root_folder):
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
@@ -16,33 +17,38 @@ def generate_flower_image(output_file, aspect_ratio, prompt, negativePrompt, wid
     else:
         device = torch.device("cpu")
 
-    # Determine which base model and LoRa to use
-    if base_model == "sd1.5":
-        pipe = StableDiffusionPipeline.from_single_file(
-            "./anyloraCheckpoint_bakedvaeBlessedFp16.safetensors",
-            use_safetensors=True,
-            # torch_dtype=torch.float32,
-            torch_dtype=torch.float16,
+    # Use the rootFolder to construct paths
+    base_model_path = os.path.join(root_folder, "Models", "Base-Models", base_model)
+    
+    # Load the base model
+    # if "flux" in base_model.lower():
+    #     transformer = FluxTransformer2DModel.from_single_file(
+    #         base_model_path,
+    #         use_safetensors=True,
+    #         torch_dtype=torch.float16,
+    #         variant="fp16"
+    #     )
+    #     pipe = FluxPipeline.from_pretrained(
+    #         "black-forest-labs/FLUX.1-dev",
+    #         transformer=transformer,
+    #         torch_dtype=torch.float16
+    #     )
+    # else:
+    print("BASE", base_model_path)
+    pipe = StableDiffusionPipeline.from_single_file(
+        base_model_path,
+        use_safetensors=True,
+        torch_dtype=torch.float16,
+        variant="fp16"
+    )
+    print("BASE", base_model_path)
 
-            variant="fp16"
-        )
-        #lora_path = "./LoRa/EPTakeuchiNaokoStyle-03.safetensors"
-
-        lora_path = "./LoRa/ghibli_style_offset.safetensors"
-    elif base_model == "sdxl":
-        pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", 
-                                                 torch_dtype=torch.float16, 
-                                                 cache_dir=cache_dir)
-        lora_path = "./LoRa/araminta_k_phantasma_anime.safetensors"
-    else:
-        raise ValueError(f"Unsupported base model: {base_model}")
-
-    # Load the LoRa model
-    pipe.load_lora_weights(lora_path)
-
+    # Load the LoRA model if specified
+    if lora_model:
+        lora_path = os.path.join(root_folder, "Models", "LoRA", lora_model)
+        pipe.load_lora_weights(lora_path)
 
     pipe.to(device)
-
 
     # If using MPS (Metal), we need to use a different generator
     if device.type == "mps":
@@ -55,7 +61,6 @@ def generate_flower_image(output_file, aspect_ratio, prompt, negativePrompt, wid
 
     def callback(step: int, *args, **kwargs):
         progress_bar.update(1)
-        print(f"PROGRESS: {step}/{num_inference_steps}")
 
     # Use the callback_on_step_end or callback_steps in the pipeline call
     image = pipe(
@@ -66,8 +71,8 @@ def generate_flower_image(output_file, aspect_ratio, prompt, negativePrompt, wid
         num_inference_steps=num_inference_steps,
         height=height,
         width=width,
-        callback=callback,  # using the updated callback
-        callback_steps=1,   # update every step
+        callback=callback,
+        callback_steps=1,
     ).images[0]
 
     image_tensor = transforms.ToTensor()(image)
@@ -101,9 +106,11 @@ if __name__ == "__main__":
     parser.add_argument("negativePrompt", type=str, help="gen image")
     parser.add_argument("width", type=float, help="width")
     parser.add_argument("height", type=float, help="height")
-    parser.add_argument("base_model", type=str, choices=["sd1.5", "sdxl"], help="Base model to use")
+    parser.add_argument("base_model", type=str, help="Base model to use")
+    parser.add_argument("lora_model", type=str, help="LoRA model to use")
+    parser.add_argument("root_folder", type=str, help="Root folder path")
 
     args = parser.parse_args()
 
     generate_flower_image(args.output_file, args.aspect_ratio, args.prompt, args.negativePrompt, 
-                          args.width, args.height, args.base_model)
+                          args.width, args.height, args.base_model, args.lora_model, args.root_folder)
