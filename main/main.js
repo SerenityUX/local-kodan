@@ -1,7 +1,7 @@
 const { app, shell, BrowserWindow, nativeImage, ipcMain, screen, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs-extra');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, execSync } = require('child_process');
 const fontkit = require('fontkit');
 const glob = require('glob');
 const ffmpeg = require('fluent-ffmpeg');
@@ -9,8 +9,14 @@ const zlib = require('zlib');
 const https = require('https');
 const http = require('http');
 const fetch = require('node-fetch');
+const os = require('os');
+const extract = require('extract-zip');
+const stream = require('stream');
+const util = require('util');
+const finished = util.promisify(stream.finished);
 
-let rootFolder
+let rootFolder;
+let dependenciesFolder;
 
 function getResourcePath(filename) {
   return app.isPackaged
@@ -18,14 +24,18 @@ function getResourcePath(filename) {
     : path.join(__dirname, '..', filename);
 }
 
-const venvPath = getResourcePath('venv');
-const runModelPath = getResourcePath('run_model.py');
-const voicePath = getResourcePath('voice.py');
-const generateCaptionPath = getResourcePath('generate_caption.py');
-const renderClipPath = getResourcePath('renderClip.py');
-const renderProjectPath = getResourcePath('renderProject.py');
+// Update these paths
+function updatePaths() {
+  dependenciesFolder = path.join(rootFolder, 'dependencies');
+  const venvPath = path.join(dependenciesFolder, 'venv');
+  const runModelPath = getResourcePath('run_model.py');
+  const voicePath = getResourcePath('voice.py');
+  const generateCaptionPath = getResourcePath('generate_caption.py');
+  const renderClipPath = getResourcePath('renderClip.py');
+  const renderProjectPath = getResourcePath('renderProject.py');
 
-
+  return { venvPath, runModelPath, voicePath, generateCaptionPath, renderClipPath, renderProjectPath };
+}
 
 let manageWindow;
 
@@ -70,8 +80,6 @@ ipcMain.on('open-manage-window', (event, type) => {
   createManageWindow(type);
 });
 
-
-
 const player = require('node-wav-player');
 
 function playFlute() {
@@ -86,7 +94,6 @@ function playFlute() {
     console.warn('Flute sound file not found');
   }
 }
-
 
 function createGreyPNG(width, height, filePath) {
   return new Promise((resolve, reject) => {
@@ -240,6 +247,7 @@ async function downloadFromCivitai(apiUrl, modelFolder, downloadId, modelName) {
     
     return new Promise((resolve, reject) => {
       response.body.on('data', (chunk) => {
+        console.log(chunk)
         downloadedBytes += chunk.length;
         const progress = totalBytes ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
         
@@ -317,7 +325,6 @@ ipcMain.handle('deleteModel', async (event, modelName, modelType) => {
     return { success: false, error: error.message };
   }
 });
-
 
 ipcMain.handle('get-voices', (event) => {
   return new Promise((resolve, reject) => {
@@ -405,6 +412,8 @@ ipcMain.handle('maximize-app', () => {
 // });
 
 ipcMain.handle('render-project', async (event, projectFolder) => {
+  const { renderProjectPath, venvPath } = updatePaths();
+
   try {
     // Open save dialog for the user to choose where to save the file and its name
     const { canceled, filePath } = await dialog.showSaveDialog({
@@ -452,8 +461,6 @@ ipcMain.handle('render-project', async (event, projectFolder) => {
   }
 });
 
-
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     icon: path.join(__dirname, 'KodanFlower.icns'), // Path to your .icns file
@@ -480,12 +487,6 @@ function createWindow() {
     console.error('Failed to load:', errorCode, errorDescription);
   });
 }
-
-
-
-
-
-
 
 function createModalWindow() {
     modalWindow = new BrowserWindow({
@@ -528,7 +529,6 @@ function createModalWindow() {
 
 }
 
-
 function ensureVoicesDirectory(projectRootPath) {
   const voicesDir = path.join(projectRootPath, 'Voices');
   if (!fs.existsSync(voicesDir)) {
@@ -541,8 +541,6 @@ function ensureVoicesDirectory(projectRootPath) {
   }
 }
 
-
-  
 function createProjectWindow(projectFilePath) {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   rootFolder = projectFilePath.split("/Projects")[0]
@@ -573,7 +571,6 @@ function createProjectWindow(projectFilePath) {
     // Optional: Handle any cleanup or state management here
   });
 }
-
 
 ipcMain.handle('delete-scene', async (event, projectFilePath, sceneIndex) => {
   try {
@@ -752,6 +749,331 @@ ipcMain.handle('add-new-scene', async (event, projectFilePath, aspectRatio) => {
   }
 });
 
+// const fetch = require('node-fetch');
+// const fs = require('fs-extra');
+// const path = require('path');
+
+
+async function downloadPython(pythonFolder, retries = 3) {
+  const pythonVersion = '3.9.0';
+  const platform = process.platform;
+  let pythonUrl;
+
+  if (platform === 'win32') {
+    pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-embed-amd64.zip`;
+  } else if (platform === 'darwin') {
+    pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-macosx10.9.pkg`;
+  } else if (platform === 'linux') {
+    pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/Python-${pythonVersion}.tgz`;
+  } else {
+    throw new Error(`Unsupported platform: ${platform}`);
+  }
+  const extension = platform === 'win32' ? 'zip' : (platform === 'darwin' ? 'pkg' : 'tgz');
+  const downloadPath = path.join(pythonFolder, `python.${extension}`);
+
+  console.log(`Starting Python ${pythonVersion} download (attempt ${4 - retries}/3)...`);
+  console.log(`Download URL: ${pythonUrl}`);
+  console.log(`Destination folder: ${pythonFolder}`);
+  console.log(`Download path: ${downloadPath}`);
+
+  try {
+    // Ensure the pythonFolder exists
+    await fs.ensureDir(pythonFolder);
+    console.log(`Ensured that ${pythonFolder} exists.`);
+
+    const response = await fetch(pythonUrl, { timeout: 60000 }); // 60 seconds timeout
+
+    if (!response.ok) {
+      throw new Error(`Failed to download Python: HTTP status ${response.status}`);
+    }
+
+    const totalBytes = parseInt(response.headers.get('content-length'), 10);
+    console.log(`Total download size: ${totalBytes} bytes`);
+
+    const fileStream = fs.createWriteStream(downloadPath, { flags: 'w' });
+    
+    await new Promise((resolve, reject) => {
+      response.body.pipe(fileStream);
+
+      fileStream.on('error', (err) => {
+        console.error(`Error writing to file: ${err.message}`);
+        reject(err);
+      });
+
+      finished(fileStream).then(resolve).catch(reject);
+    });
+
+    console.log('Python download completed. Waiting for file to be fully written...');
+    
+    // Wait an additional second to ensure the file is fully written
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    if (platform === 'darwin') {
+      console.log('Extracting Python package on macOS...');
+      const tempDir = path.join(pythonFolder, 'temp_extract');
+      
+      // Ensure the temp directory is removed if it exists
+      if (await fs.pathExists(tempDir)) {
+        console.log('Removing existing temporary directory...');
+        await fs.remove(tempDir);
+      }
+      
+      await fs.ensureDir(tempDir);
+      
+      // Extract the .pkg file
+      await new Promise((resolve, reject) => {
+        exec(`pkgutil --expand-full "${downloadPath}" "${tempDir}"`, (error, stdout, stderr) => {
+          if (error) {
+            console.error(`Error expanding Python package: ${error.message}`);
+            reject(error);
+          } else {
+            console.log('Python package expanded successfully.');
+            resolve();
+          }
+        });
+      });
+
+      // Find and copy the Python.framework
+      const frameworkPath = path.join(tempDir, 'Python.framework');
+      const destFrameworkPath = path.join(pythonFolder, 'Python.framework');
+      
+      // Remove existing Python.framework if it exists
+      if (await fs.pathExists(destFrameworkPath)) {
+        console.log('Removing existing Python.framework...');
+        await fs.remove(destFrameworkPath);
+      }
+      
+      await fs.copy(frameworkPath, destFrameworkPath);
+      console.log('Python.framework copied to dependencies folder.');
+
+      // Clean up temporary directory
+      await fs.remove(tempDir);
+    } else if (platform === 'win32' || platform === 'linux') {
+      console.log(`Extracting Python from ${downloadPath} to ${pythonFolder}`);
+      try {
+        await extract(downloadPath, { dir: pythonFolder });
+        console.log('Python extracted successfully.');
+      } catch (extractError) {
+        console.error('Error during extraction:', extractError);
+        throw extractError;
+      }
+    }
+
+    // Clean up the downloaded file
+    await fs.remove(downloadPath);
+    console.log('Cleaned up Python download file.');
+
+    // Create a symlink or batch file to easily run Python
+    if (platform === 'darwin' || platform === 'linux') {
+      const pythonBinPath = path.join(pythonFolder, 'Python.framework', 'Versions', pythonVersion, 'bin', 'python3');
+      const symlinkPath = path.join(pythonFolder, 'python');
+      await fs.symlink(pythonBinPath, symlinkPath);
+      console.log(`Created symlink at ${symlinkPath}`);
+    } else if (platform === 'win32') {
+      const batchContent = `@echo off\n"${path.join(pythonFolder, 'python.exe')}" %*`;
+      await fs.writeFile(path.join(pythonFolder, 'python.bat'), batchContent);
+      console.log('Created python.bat file');
+    }
+
+    console.log('Python setup completed.');
+  } catch (error) {
+    console.error(`Error during download or installation: ${error.message}`);
+    if (retries > 0) {
+      console.log(`Operation failed. Retrying... (${retries} attempts left)`);
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+      return downloadPython(pythonFolder, retries - 1);
+    } else {
+      throw error;
+    }
+  }
+}
+
+async function setupDependencies() {
+  if (!rootFolder) {
+    throw new Error('rootFolder is not set. Please set it before calling setupDependencies.');
+  }
+
+  dependenciesFolder = path.join(rootFolder, 'dependencies');
+  const pythonFolder = path.join(dependenciesFolder, 'python');
+  const venvFolder = path.join(dependenciesFolder, 'venv');
+
+  if (!fs.existsSync(dependenciesFolder)) {
+    fs.mkdirSync(dependenciesFolder, { recursive: true });
+  }
+
+  // Check if FFmpeg is installed
+  try {
+    execSync('ffmpeg -version', { stdio: 'ignore' });
+    console.log('FFmpeg is already installed.');
+  } catch (error) {
+    console.log('FFmpeg not found. Installing...');
+    await installFFmpeg();
+  }
+
+  // Check for Python 3.9.0 on macOS
+  if (process.platform === 'darwin') {
+    try {
+      // Look for Python 3.9.0 in common installation locations
+      const pythonPaths = [
+        '/usr/local/bin/python3.9',
+        '/usr/bin/python3.9',
+        '/Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9'
+      ];
+
+      let python39Path;
+      for (const path of pythonPaths) {
+        if (fs.existsSync(path)) {
+          python39Path = path;
+          break;
+        }
+      }
+
+      if (!python39Path) {
+        throw new Error('Python 3.9.0 not found');
+      }
+
+      const pythonVersion = execSync(`${python39Path} --version`, { encoding: 'utf8' }).trim();
+      const pipVersion = execSync(`${python39Path} -m pip --version`, { encoding: 'utf8' }).trim();
+      
+      if (pythonVersion.startsWith('Python 3.9.0') && pipVersion.includes('pip')) {
+        console.log('Python 3.9.0 and pip are found.');
+        // Use this Python 3.9.0 path for further operations
+        pythonPath = python39Path;
+      } else {
+        throw new Error('Incorrect Python version');
+      }
+    } catch (error) {
+      console.log('Python 3.9.0 or pip not found. Downloading Python 3.9.0 installer...');
+      await downloadAndOpenPythonInstaller();
+      throw new Error('Please install Python 3.9.0 and run the application again.');
+    }
+  } else {
+    // For other platforms, proceed with the existing Python setup
+    if (!fs.existsSync(pythonFolder)) {
+      console.log('Python not found. Downloading and installing...');
+      try {
+        await downloadPython(pythonFolder);
+      } catch (error) {
+        console.error('Failed to download and install Python:', error.message);
+        console.log('Please download Python 3.9.0 manually and place it in the following folder:');
+        console.log(pythonFolder);
+        throw error;
+      }
+    }
+    pythonPath = path.join(pythonFolder, 'python');
+  }
+
+  // Create virtual environment if it doesn't exist
+  if (!fs.existsSync(venvFolder)) {
+    console.log('Creating virtual environment...');
+    await exec(`"${pythonPath}" -m venv "${venvFolder}"`);
+  }
+
+  // Install required packages
+  console.log('Installing required packages...');
+  const venvPythonPath = process.platform === 'win32' ? 
+    path.join(venvFolder, 'Scripts', 'python') : 
+    path.join(venvFolder, 'bin', 'python');
+  const requirementsPath = getResourcePath('requirements.txt');
+  
+  console.log("REQUIREMENTS", requirementsPath);
+
+  // Upgrade pip first
+  const upgradePipCommand = `"${venvPythonPath}" -m pip install --upgrade pip`;
+  console.log("Upgrading pip command:", upgradePipCommand);
+  try {
+    const { stdout, stderr } = await exec(upgradePipCommand);
+    console.log('Pip upgrade stdout:', stdout);
+    console.log('Pip upgrade stderr:', stderr);
+  } catch (error) {
+    console.error('Error upgrading pip:', error);
+  }
+
+  // Install packages with verbose output
+  const pipInstall = process.platform === 'darwin' ?
+    `"${venvPythonPath}3" -m pip install -r "${requirementsPath}" -v` :
+    `"${venvPythonPath}" -m pip install -r "${requirementsPath}" -v`;
+  console.log("Installing packages command:", pipInstall);
+  
+  // Execute pip install and wait for it to complete
+  return new Promise((resolve, reject) => {
+    const child = exec(pipInstall);
+    
+    child.stdout.on('data', (data) => {
+      console.log('Pip install stdout:', data);
+    });
+    
+    child.stderr.on('data', (data) => {
+      console.log('Pip install stderr:', data);
+    });
+    
+    child.on('close', (code) => {
+      if (code !== 0) {
+        console.error(`Pip install process exited with code ${code}`);
+        reject(new Error(`Pip install failed with code ${code}`));
+      } else {
+        console.log('Pip install process completed successfully');
+        resolve();
+      }
+    });
+  });
+}
+
+async function downloadAndOpenPythonInstaller() {
+  const pythonVersion = '3.9.0';
+  const installerUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-macosx10.9.pkg`;
+  const installerPath = path.join(app.getPath('temp'), `python-${pythonVersion}-installer.pkg`);
+
+  console.log('Downloading Python installer...');
+  const response = await fetch(installerUrl);
+  const fileStream = fs.createWriteStream(installerPath);
+  await new Promise((resolve, reject) => {
+    response.body.pipe(fileStream);
+    response.body.on('error', reject);
+    fileStream.on('finish', resolve);
+  });
+
+  console.log('Opening Python installer...');
+  shell.openPath(installerPath);
+}
+
+
+async function installFFmpeg() {
+  return new Promise((resolve, reject) => {
+    let command;
+    switch (os.platform()) {
+      case 'darwin':
+        command = 'brew install ffmpeg';
+        break;
+      case 'win32':
+        command = 'winget install ffmpeg';
+        break;
+      case 'linux':
+        if (os.release().toLowerCase().includes('ubuntu') || os.release().toLowerCase().includes('debian')) {
+          command = 'sudo apt-get update && sudo apt-get install -y ffmpeg';
+        } else if (os.release().toLowerCase().includes('fedora') || os.release().toLowerCase().includes('centos')) {
+          command = 'sudo dnf install -y ffmpeg';
+        } else {
+          reject(new Error('Unsupported Linux distribution'));
+          return;
+        }
+        break;
+      default:
+        reject(new Error('Unsupported operating system'));
+        return;
+    }
+
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Error installing FFmpeg: ${error.message}`);
+        reject(error);
+      } else {
+        console.log('FFmpeg installed successfully');
+        resolve();
+      }
+    });
+  });
+}
 
 app.whenReady().then(() => {
   // app.setAppUserModelId('com.serenidad.kodan'); // Optional for Windows, doesn't impact macOS
@@ -762,8 +1084,6 @@ app.whenReady().then(() => {
   app.commandLine.appendSwitch('use-angle', 'metal');  // Use Metal for rendering on Apple Silicon
   process.env.PYTORCH_ENABLE_MPS_FALLBACK = "1";
 
-
-
 });
 
 let lastNumber = 0
@@ -771,6 +1091,7 @@ let lastNumber = 0
 
 function renderClip(projectPath, sceneNumber) {
   // const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
+  const { renderClipPath, venvPath } = updatePaths();
 
   const activateAndRun = `source ${venvPath}/bin/activate && python3 ${renderClipPath} "${projectPath}" "${sceneNumber}"`;
 
@@ -812,7 +1133,10 @@ function checkAndRenderClip(projectPath, sceneNumber) {
 }
 
 
-ipcMain.on('run-voice-model', (event, arg) => {
+ipcMain.on('run-voice-model', async (event, arg) => {
+  await setupDependencies();
+  const { venvPath, runModelPath, voicePath } = updatePaths();
+
   const sceneNumber = parseInt(arg.outputLocation.split("Voicelines/")[1].split(".mp3")[0]);
   generatingVoicelines.add(sceneNumber);
 
@@ -893,33 +1217,56 @@ ipcMain.handle('check-voice-generation-status', (event, sceneNumber) => {
 ipcMain.handle('open-external-link', (event, url) => {
   shell.openExternal(url);
 });
-ipcMain.on('run-model', (event, arg) => {
-  playFlute()
-  // const venvPath = path.join(__dirname, '../venv');
-  const outputPath = arg.outputPath;
-  const aspectRatio = arg.aspectRatio;
-  const prompt = arg.prompt;
-  const negativePrompt = arg.negativePrompt;
-  const width = arg.width;
-  const height = arg.height;
-  const sceneIndex = arg.sceneIndex;
-  const baseModel = arg.baseModel;
-  const loraModule = arg.loraModule;
+ipcMain.on('run-model', async (event, arg) => {
+  try {
+    await setupDependencies();
+    const { venvPath, runModelPath } = updatePaths();
 
-  const projectPath = arg.outputPath.split("/Images")[0];
-  const rootFolder = projectPath.split("/Projects")[0];
-  console.log("root folder", rootFolder);
+    playFlute();
+    const outputPath = arg.outputPath;
+    const aspectRatio = arg.aspectRatio;
+    const prompt = arg.prompt;
+    const negativePrompt = arg.negativePrompt;
+    const width = arg.width;
+    const height = arg.height;
+    const sceneIndex = arg.sceneIndex;
+    const baseModel = arg.baseModel;
+    const loraModule = arg.loraModule;
 
+    const projectPath = arg.outputPath.split("/Images")[0];
+    const rootFolder = projectPath.split("/Projects")[0];
+    console.log("root folder", rootFolder);
 
-  app.whenReady().then(() => {
-    const activateAndRun = `source ${venvPath}/bin/activate && python3 -u "${runModelPath}" "${outputPath}" ${aspectRatio} "${prompt}" "${negativePrompt}" ${width} ${height} "${baseModel}" "${loraModule}" "${rootFolder}"`;
-    let stderrBuffer = Buffer.from(''); // Define stderrBuffer here
+    const pythonPath = process.platform === 'win32' 
+      ? path.join(venvPath, 'Scripts', 'python.exe')
+      : path.join(venvPath, 'bin', 'python');
 
-    const process = exec(activateAndRun);
+    const activateAndRun = `"${pythonPath}" "${runModelPath}" "${outputPath}" ${aspectRatio} "${prompt}" "${negativePrompt}" ${width} ${height} "${baseModel}" "${loraModule}" "${rootFolder}"`;
+    console.log("Running command:", activateAndRun);
 
+    let stderrBuffer = '';
     let isProcessClosed = false;
 
-    process.stdout.on('data', (data) => {
+    const childProcess = exec(activateAndRun);
+
+    childProcess.stdout.on('data', (data) => {
+      data.split('\n').forEach(line => {
+        const trimmedLine = line.trim();
+        console.log('stdout here:', trimmedLine);
+        
+        const progressMatch = trimmedLine.match(/ge:\s*(\d+)%\|/);
+        
+        if (progressMatch) {
+          const progressPercent = parseInt(progressMatch[1], 10);
+          if (!isNaN(progressPercent)) {
+            console.log(`Progress for scene ${sceneIndex}:`, progressPercent);
+            event.sender.send('progress-update', sceneIndex, progressPercent);
+          }
+        }
+      });
+    });
+
+    childProcess.stdout.on('data', (data) => {
       if (!isProcessClosed) {
         data.split('\n').forEach(line => {
           const trimmedLine = line.trim();
@@ -939,7 +1286,7 @@ ipcMain.on('run-model', (event, arg) => {
         });
       }
     });
-    process.stderr.on('data', (data) => {
+    childProcess.stderr.on('data', (data) => {
       if (!isProcessClosed) {
         stderrBuffer += data.toString(); // Accumulate stderr output
 
@@ -960,16 +1307,17 @@ ipcMain.on('run-model', (event, arg) => {
         });
       }
     });
-    // process.stderr.on('data', (data) => {
-    //   if (!isProcessClosed) {
-    //     console.warn(`stderr for scene ${sceneIndex}:`, data.toString());
-    //   }
-    // });
 
-    process.on('close', async (code) => {
+    childProcess.stderr.on('data', (data) => {
+      stderrBuffer += data;
+      console.error('stderr:', data);
+    });
+
+    childProcess.on('close', async (code) => {
       isProcessClosed = true;
+
       console.log(`Process for scene ${sceneIndex} exited with code ${code}`);
-      playFlute()
+      playFlute();
 
       if (code === 0) {
         try {
@@ -984,13 +1332,9 @@ ipcMain.on('run-model', (event, arg) => {
           console.error(`Error updating caption for scene ${sceneIndex}:`, error);
         }
       } else {
-        // Handle the error case
         let errorMessage = `Image generation failed for scene ${sceneIndex}. Please check your inputs and try again.`;
-        console.log(errorMessage)
-        // Check if there's a specific error message in the stderr
-        const stderrContent = stderrBuffer.toString().trim();
-        if (stderrContent) {
-          errorMessage = `Image generation failed: ${stderrContent}`;
+        if (stderrBuffer.trim()) {
+          errorMessage = `Image generation failed: ${stderrBuffer.trim()}`;
         }
 
         event.sender.send('run-model-response', sceneIndex, {
@@ -998,15 +1342,11 @@ ipcMain.on('run-model', (event, arg) => {
           message: errorMessage,
         });
 
-        // Send an additional event to notify the renderer process about the error
         event.sender.send('image-generation-error', {
           sceneIndex,
           errorMessage,
         });
       }
-
-          // Add this to capture stderr output
-
 
       checkAndRenderClip(projectPath, sceneIndex);
 
@@ -1015,7 +1355,13 @@ ipcMain.on('run-model', (event, arg) => {
         message: code === 0 ? 'Image generation and caption update completed successfully' : `Process exited with code ${code}`,
       });
     });
-  });
+  } catch (error) {
+    console.error('Error in run-model:', error);
+    event.sender.send('run-model-response', arg.sceneIndex, {
+      success: false,
+      message: `An error occurred: ${error.message}`,
+    });
+  }
 });
 
 
@@ -1080,38 +1426,6 @@ ipcMain.handle('createProject', async (event, projectDetails) => {
       console.error('Error creating images:', err);
     });
 
-    // sharp({
-    //     create: {
-    //       width: widthPx,
-    //       height: heightPx,
-    //       channels: 4,
-    //       background: '#F2F2F2',
-    //     }
-    //   })
-    //   .png()
-    //   .toFile(thumbnailPath)
-    //   .then(() => {
-    //     console.log('Thumbnail.png created.');
-    //   })
-    //   .catch(err => {
-    //     console.error('Error creating thumbnail:', err);
-    //   });
-    //   sharp({
-    //     create: {
-    //       width: widthPx,
-    //       height: heightPx,
-    //       channels: 4,
-    //       background: '#F2F2F2',
-    //     }
-    //   })
-    //   .png()
-    //   .toFile(firstScenePath)
-    //   .then(() => {
-    //     console.log('Thumbnail.png created.');
-    //   })
-    //   .catch(err => {
-    //     console.error('Error creating thumbnail:', err);
-    //   });
     // Create project.kodan
     const projectFilePath = path.join(projectDir, 'project.kodan');
     const projectData = {
@@ -1299,6 +1613,7 @@ ipcMain.handle('update-scene-caption', async (event, projectFilePath, sceneIndex
 });
 
 ipcMain.handle('update-caption', async (event, projectFilePath, sceneIndex, captionSettings) => {
+  const { generateCaptionPath, venvPath } = updatePaths();
   try {
     const projectData = JSON.parse(fs.readFileSync(projectFilePath, 'utf-8'));
     const scene = projectData.scenes[sceneIndex - 1];
