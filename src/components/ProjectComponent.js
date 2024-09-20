@@ -3,6 +3,7 @@ import { debounce } from 'lodash';
 import animeFacts from './animeFacts.json';
 import { Img } from 'react-image'
 import { useInterval } from 'react-use';
+import { Tooltip } from 'react-tooltip';
 
 const ProjectComponent = ({ filePath }) => {
   const [projectData, setProjectData] = useState(null);
@@ -12,6 +13,8 @@ const ProjectComponent = ({ filePath }) => {
   const [refreshKey, setRefreshKey] = useState(Date.now()); // Key to force image refresh
   const [imgW, setImgW] = useState(0); // Width of the image
   const [imgH, setImgH] = useState(0); // Height of the image
+  const [composeUserInput, setComposeUserInput] = useState("");
+  const [composeSubmitted, setComposeSubmitted] = useState(false);
 
   const [voiceText, setVoiceText] = useState('');
   const [speakerWav, setSpeakerWav] = useState('Narrator');
@@ -652,6 +655,9 @@ const handleSpeakerChange = async (event) => {
     }
   };
 
+  const [composeMode, setComposeMode] = useState(false);
+
+
   const [pressedAddScene, setPressedAddScene] = useState(false);
 
   const [sceneDuration, setSceneDuration] = useState(null);
@@ -773,7 +779,9 @@ const handleSpeakerChange = async (event) => {
   }, []);
 
   return (
-    <div style={{ height: '100%', width: "100%", display: 'flex', flexDirection: 'column', fontFamily: 'Arial, sans-serif', margin: 0, padding: 0, alignItems: 'center', justifyContent: 'space-between' }}>
+
+    !composeMode ? 
+    (<div style={{ height: '100%', width: "100%", display: 'flex', flexDirection: 'column', fontFamily: 'Arial, sans-serif', margin: 0, padding: 0, alignItems: 'center', justifyContent: 'space-between' }}>
 <div style={{width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", height: 45, backgroundColor: "#fff", borderBottom: "1px solid #D9D9D9", WebkitAppRegion: "drag"}}>
   <div style={{marginLeft: 12, display: "flex", flexDirection: "row", gap: 9}}>
     {/* Close button */}
@@ -833,34 +841,55 @@ const handleSpeakerChange = async (event) => {
           <div style={{display: "flex", gap: 12, overflowY: "scroll", flexDirection: "column",  paddingTop:  "12px"}}>
           <div style={{display: "flex", flexDirection: "column", gap: 12}}>
           <p style={{fontSize: 16, alignItems: "center", display: "flex", gap: "8px", color: "#404040", marginTop: 0, marginLeft: 12, marginBottom: 0}}>          <Img src="icons/Picture.svg"/>Style</p>
-          <div style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
-            <p style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}>BASE MODEL</p>
-            <select 
-              value={baseModel}
-              onChange={handleBaseModelChange}
-              onClick={fetchBaseModels}
-              style={{
-                width: "calc(100% - 24px)", 
-                marginLeft: 12, 
-                appearance: "none",
-                marginRight: 12,
-                padding: "4px 4px",
-                border: "1px solid #D9D9D9",
-                borderRadius: "4px",
-                backgroundColor: "#fff",
-                fontSize: "14px",
-                color: "#404040"
-              }}
-            >
-              {baseModels.length == 0 && <option>Select Base Model</option>}
-              {baseModels.map((model) => (
-                <option key={model} value={model}>{model}</option>
-              ))}
-              <option value="manage">Manage Base Models</option>
-            </select>
-          </div>
+          <div
+                data-tooltip-id="base-model-tooltip"
+                data-tooltip-content="A base model is a pre-trained AI model that serves as the foundation for generating images. It contains general knowledge about visual concepts and styles."
 
-<div style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
+          style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
+    
+    <p 
+      style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}
+    >
+      BASE MODEL
+    </p>
+    <select 
+      value={baseModel}
+      onChange={handleBaseModelChange}
+      onClick={fetchBaseModels}
+      style={{
+        width: "calc(100% - 24px)", 
+        marginLeft: 12, 
+        appearance: "none",
+        marginRight: 12,
+        padding: "4px 4px",
+        border: "1px solid #D9D9D9",
+        borderRadius: "4px",
+        backgroundColor: "#fff",
+        fontSize: "14px",
+        color: "#404040"
+      }}
+    >
+      {baseModels.length == 0 && <option>Select Base Model</option>}
+      {baseModels.map((model) => (
+        <option key={model} value={model}>{model}</option>
+      ))}
+      <option value="manage">Manage Base Models</option>
+    </select>
+
+  </div>
+  {baseModels.length == 0 && <Tooltip 
+      id="base-model-tooltip" 
+      place="top" 
+      type="dark" 
+      effect="solid" 
+      style={{ maxWidth: '300px' }}
+    />}
+
+<div 
+                data-tooltip-id="lora-model-tooltip"
+                data-tooltip-content="A LoRA (Low-Rank Adaptation) module is a fine-tuning technique that allows for efficient adaptation of large language models. It can be used to specialize a base model for specific styles or subjects."
+
+style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
   <p style={{color: "#404040", fontWeight: 800, marginTop: 0, marginBottom: 0, fontSize: 6, marginLeft: 12, marginRight: 12}}>LORA MODULE</p>
   <select 
     value={selectedLora}
@@ -887,6 +916,14 @@ const handleSpeakerChange = async (event) => {
 
     <option value="manage">Manage LoRa Modules</option>
   </select>
+  {loraModules.length == 0 && <Tooltip 
+      id="lora-model-tooltip" 
+      place="top" 
+      type="dark" 
+      effect="solid" 
+      style={{ maxWidth: '300px' }}
+    />}
+
 </div>
           </div>
           <div style={{width: "100%", height: "1px", backgroundColor: "#D9D9D9"}}></div>
@@ -1468,8 +1505,60 @@ const handleSpeakerChange = async (event) => {
           </div>
         </div>
       </div>
-    </div>
-  );
-};
+    </div>) : 
+    (
+      <div style={{ height: '100%', width: "100%", display: 'flex', flexDirection: 'column', fontFamily: 'Arial, sans-serif', margin: 0, padding: 0, alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", height: 45, backgroundColor: "#fff", borderBottom: "1px solid #D9D9D9", WebkitAppRegion: "drag"}}>
+          <div style={{marginLeft: 12, display: "flex", flexDirection: "row", gap: 9}}>
+            {/* Close button */}
+            <div 
+              onClick={() => window.electron.ipcRenderer.invoke('close-app')}
+              style={{backgroundColor: "#FE5F58", width: 14, height: 14, borderRadius: 7, cursor: "pointer", WebkitAppRegion: "no-drag" }}
+            ></div>
+            
+            {/* Minimize button */}
+            <div 
+              onClick={() => window.electron.ipcRenderer.invoke('minimize-app')}
+              style={{backgroundColor: "#FEBC2F", width: 14, height: 14, borderRadius: 7, cursor: "pointer", WebkitAppRegion: "no-drag" }}
+            ></div>
+            
+            {/* Maximize button (adjusts window size to screen dimensions) */}
+            <div 
+              onClick={() => window.electron.ipcRenderer.invoke('maximize-app')}
+              style={{backgroundColor: "#28C840", width: 14, height: 14, borderRadius: 7, cursor: "pointer", WebkitAppRegion: "no-drag" }}
+            ></div>
+          </div>        
+        </div>
+<div style={{display: "flex", flexDirection: "row", widows: "100vw", justifyContent: "center"}}>
+
+<div style={{display: "flex", height: "100%", width: "50vw", borderLeft: "1px solid #D9D9D9",  borderRight: "1px solid #D9D9D9"}}>
+<div style={{ position: 'relative', width: "100%", height: "100%", display: "flex" }}>
+  <textarea 
+    style={{width: '100%', padding: '8px', height: 'calc(100vh - 46px)', border: '0px', borderRadius: '0px', resize: 'none', overflowY: 'auto', fontFamily: 'system-ui, sans-serif'}}
+    value={composeUserInput}
+    onChange={e => setComposeUserInput(e.target.value)}
+    placeholder="Compose your story..."
+    placeholderStyle={{color: '#BFBFBF'}}
+    disabled={composeSubmitted}
+  ></textarea>
+  {!composeSubmitted && <button 
+    style={{ position: 'absolute', bottom: 12, right: 12, backgroundColor: '#000', color: 'white', border: 'none', fontWeight: 500, borderRadius: '4px', fontSize: "16px", padding: "4px 8px", cursor: 'pointer', opacity: composeUserInput ? 1 : 0.5 }}
+    disabled={!composeUserInput}
+    onClick={() => setComposeSubmitted(true)}
+  >
+    Generate Story
+  </button>}
+</div>        
+</div>
+{composeSubmitted &&        <div style={{display: "flex", height: "100%", width: "50vw", borderLeft: "0px solid #D9D9D9",  borderRight: "1px solid #D9D9D9"}}>
+<div style={{ position: 'relative', width: "100%", height: "100%", display: "flex" }}>
+  <p style={{fontSize: 16, width: "100%", height: "100%", display: "flex", margin: 0, padding: 8}}>Enriching Story...</p>
+  
+</div>        
+</div>}
+</div>
+      </div> 
+  )
+)}
 
 export default ProjectComponent;

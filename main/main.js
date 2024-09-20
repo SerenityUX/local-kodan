@@ -15,6 +15,8 @@ const stream = require('stream');
 const util = require('util');
 const finished = util.promisify(stream.finished);
 
+
+
 let rootFolder;
 let dependenciesFolder;
 
@@ -27,6 +29,8 @@ function getResourcePath(filename) {
 // Update these paths
 function updatePaths() {
   dependenciesFolder = path.join(rootFolder, 'dependencies');
+  const pythonFolder = path.join(dependenciesFolder, 'python');
+  const ffmpegFolder = path.join(dependenciesFolder, 'ffmpeg');
   const venvPath = path.join(dependenciesFolder, 'venv');
   const runModelPath = getResourcePath('run_model.py');
   const voicePath = getResourcePath('voice.py');
@@ -34,6 +38,11 @@ function updatePaths() {
   const renderClipPath = getResourcePath('renderClip.py');
   const renderProjectPath = getResourcePath('renderProject.py');
 
+
+  // Update PATH to include FFmpeg
+  process.env.PATH = `${ffmpegFolder}${path.delimiter}${process.env.PATH}`;
+
+  
   return { venvPath, runModelPath, voicePath, generateCaptionPath, renderClipPath, renderProjectPath };
 }
 
@@ -755,33 +764,17 @@ ipcMain.handle('add-new-scene', async (event, projectFilePath, aspectRatio) => {
 
 
 async function downloadPython(pythonFolder, retries = 3) {
-  const pythonVersion = '3.9.0';
-  const platform = process.platform;
-  let pythonUrl;
+  const pythonUrl = 'https://github.com/SerenityUX/pythonZip3.9/raw/main/python.zip';
 
-  if (platform === 'win32') {
-    pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-embed-amd64.zip`;
-  } else if (platform === 'darwin') {
-    pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-macosx10.9.pkg`;
-  } else if (platform === 'linux') {
-    pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/Python-${pythonVersion}.tgz`;
-  } else {
-    throw new Error(`Unsupported platform: ${platform}`);
-  }
-  const extension = platform === 'win32' ? 'zip' : (platform === 'darwin' ? 'pkg' : 'tgz');
-  const downloadPath = path.join(pythonFolder, `python.${extension}`);
-
-  console.log(`Starting Python ${pythonVersion} download (attempt ${4 - retries}/3)...`);
+  console.log(`Starting Python download (attempt ${4 - retries}/3)...`);
   console.log(`Download URL: ${pythonUrl}`);
   console.log(`Destination folder: ${pythonFolder}`);
-  console.log(`Download path: ${downloadPath}`);
 
   try {
-    // Ensure the pythonFolder exists
     await fs.ensureDir(pythonFolder);
     console.log(`Ensured that ${pythonFolder} exists.`);
 
-    const response = await fetch(pythonUrl, { timeout: 60000 }); // 60 seconds timeout
+    const response = await fetch(pythonUrl, { timeout: 60000 });
 
     if (!response.ok) {
       throw new Error(`Failed to download Python: HTTP status ${response.status}`);
@@ -790,104 +783,63 @@ async function downloadPython(pythonFolder, retries = 3) {
     const totalBytes = parseInt(response.headers.get('content-length'), 10);
     console.log(`Total download size: ${totalBytes} bytes`);
 
-    const fileStream = fs.createWriteStream(downloadPath, { flags: 'w' });
+    const downloadPath = path.join(pythonFolder, 'python.zip');
+    const fileStream = fs.createWriteStream(downloadPath);
     
     await new Promise((resolve, reject) => {
       response.body.pipe(fileStream);
-
-      fileStream.on('error', (err) => {
-        console.error(`Error writing to file: ${err.message}`);
-        reject(err);
-      });
-
-      finished(fileStream).then(resolve).catch(reject);
+      fileStream.on('finish', resolve);
+      fileStream.on('error', reject);
     });
 
-    console.log('Python download completed. Waiting for file to be fully written...');
-    
-    // Wait an additional second to ensure the file is fully written
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log('Python download completed. Extracting...');
 
-    if (platform === 'darwin') {
-      console.log('Extracting Python package on macOS...');
-      const tempDir = path.join(pythonFolder, 'temp_extract');
-      
-      // Ensure the temp directory is removed if it exists
-      if (await fs.pathExists(tempDir)) {
-        console.log('Removing existing temporary directory...');
-        await fs.remove(tempDir);
-      }
-      
-      await fs.ensureDir(tempDir);
-      
-      // Extract the .pkg file
-      await new Promise((resolve, reject) => {
-        exec(`pkgutil --expand-full "${downloadPath}" "${tempDir}"`, (error, stdout, stderr) => {
-          if (error) {
-            console.error(`Error expanding Python package: ${error.message}`);
-            reject(error);
-          } else {
-            console.log('Python package expanded successfully.');
-            resolve();
-          }
-        });
-      });
-
-      // Find and copy the Python.framework
-      const frameworkPath = path.join(tempDir, 'Python.framework');
-      const destFrameworkPath = path.join(pythonFolder, 'Python.framework');
-      
-      // Remove existing Python.framework if it exists
-      if (await fs.pathExists(destFrameworkPath)) {
-        console.log('Removing existing Python.framework...');
-        await fs.remove(destFrameworkPath);
-      }
-      
-      await fs.copy(frameworkPath, destFrameworkPath);
-      console.log('Python.framework copied to dependencies folder.');
-
-      // Clean up temporary directory
-      await fs.remove(tempDir);
-    } else if (platform === 'win32' || platform === 'linux') {
-      console.log(`Extracting Python from ${downloadPath} to ${pythonFolder}`);
-      try {
-        await extract(downloadPath, { dir: pythonFolder });
-        console.log('Python extracted successfully.');
-      } catch (extractError) {
-        console.error('Error during extraction:', extractError);
-        throw extractError;
-      }
+    // Remove existing Python folder if it exists
+    const extractPath = path.join(pythonFolder, 'python');
+    if (await fs.pathExists(extractPath)) {
+      await fs.remove(extractPath);
     }
 
-    // Clean up the downloaded file
+    // Extract the zip file
+    await extract(downloadPath, { 
+      dir: pythonFolder,
+      onEntry: (entry, zipfile) => {
+        if (entry.type === 'SymbolicLink') {
+          // Skip symlink creation during extraction
+          entry.autodrain();
+        }
+      }
+    });
+
+    console.log('Python extracted successfully.');
+
+    // Clean up the downloaded zip file
     await fs.remove(downloadPath);
-    console.log('Cleaned up Python download file.');
 
-    // Create a symlink or batch file to easily run Python
-    if (platform === 'darwin' || platform === 'linux') {
-      const pythonBinPath = path.join(pythonFolder, 'Python.framework', 'Versions', pythonVersion, 'bin', 'python3');
-      const symlinkPath = path.join(pythonFolder, 'python');
-      await fs.symlink(pythonBinPath, symlinkPath);
-      console.log(`Created symlink at ${symlinkPath}`);
-    } else if (platform === 'win32') {
-      const batchContent = `@echo off\n"${path.join(pythonFolder, 'python.exe')}" %*`;
-      await fs.writeFile(path.join(pythonFolder, 'python.bat'), batchContent);
-      console.log('Created python.bat file');
+    // Set the path to the Python executable
+    const pythonExecutable = process.platform === 'win32'
+      ? path.join(pythonFolder, 'python', 'python.exe')
+      : path.join(pythonFolder, 'python', 'install', 'bin', 'python3');
+    console.log(`Python executable path: ${pythonExecutable}`);
+
+    // Verify that the Python executable exists
+    if (await fs.pathExists(pythonExecutable)) {
+      console.log('Python setup completed successfully.');
+      return pythonExecutable;
+    } else {
+      throw new Error('Python executable not found after extraction.');
     }
-
-    console.log('Python setup completed.');
   } catch (error) {
     console.error(`Error during download or installation: ${error.message}`);
     if (retries > 0) {
       console.log(`Operation failed. Retrying... (${retries} attempts left)`);
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 5000));
       return downloadPython(pythonFolder, retries - 1);
     } else {
       throw error;
     }
   }
 }
-
 async function setupDependencies() {
   if (!rootFolder) {
     throw new Error('rootFolder is not set. Please set it before calling setupDependencies.');
@@ -895,78 +847,55 @@ async function setupDependencies() {
 
   dependenciesFolder = path.join(rootFolder, 'dependencies');
   const pythonFolder = path.join(dependenciesFolder, 'python');
+  const ffmpegFolder = path.join(dependenciesFolder, 'ffmpeg');
   const venvFolder = path.join(dependenciesFolder, 'venv');
 
   if (!fs.existsSync(dependenciesFolder)) {
     fs.mkdirSync(dependenciesFolder, { recursive: true });
   }
 
-  // Check if FFmpeg is installed
-  try {
-    execSync('ffmpeg -version', { stdio: 'ignore' });
-    console.log('FFmpeg is already installed.');
-  } catch (error) {
-    console.log('FFmpeg not found. Installing...');
-    await installFFmpeg();
-  }
-
-  // Check for Python 3.9.0 on macOS
-  if (process.platform === 'darwin') {
-    try {
-      // Look for Python 3.9.0 in common installation locations
-      const pythonPaths = [
-        '/usr/local/bin/python3.9',
-        '/usr/bin/python3.9',
-        '/Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9'
-      ];
-
-      let python39Path;
-      for (const path of pythonPaths) {
-        if (fs.existsSync(path)) {
-          python39Path = path;
-          break;
-        }
-      }
-
-      if (!python39Path) {
-        throw new Error('Python 3.9.0 not found');
-      }
-
-      const pythonVersion = execSync(`${python39Path} --version`, { encoding: 'utf8' }).trim();
-      const pipVersion = execSync(`${python39Path} -m pip --version`, { encoding: 'utf8' }).trim();
-      
-      if (pythonVersion.startsWith('Python 3.9.0') && pipVersion.includes('pip')) {
-        console.log('Python 3.9.0 and pip are found.');
-        // Use this Python 3.9.0 path for further operations
-        pythonPath = python39Path;
-      } else {
-        throw new Error('Incorrect Python version');
-      }
-    } catch (error) {
-      console.log('Python 3.9.0 or pip not found. Downloading Python 3.9.0 installer...');
-      await downloadAndOpenPythonInstaller();
-      throw new Error('Please install Python 3.9.0 and run the application again.');
-    }
+  // Check if FFmpeg is installed in the dependencies folder
+  if (!fs.existsSync(path.join(ffmpegFolder, 'ffmpeg'))) {
+    console.log('FFmpeg not found in dependencies. Installing...');
+    await installFFmpeg(ffmpegFolder);
   } else {
-    // For other platforms, proceed with the existing Python setup
-    if (!fs.existsSync(pythonFolder)) {
-      console.log('Python not found. Downloading and installing...');
-      try {
-        await downloadPython(pythonFolder);
-      } catch (error) {
-        console.error('Failed to download and install Python:', error.message);
-        console.log('Please download Python 3.9.0 manually and place it in the following folder:');
-        console.log(pythonFolder);
-        throw error;
-      }
-    }
-    pythonPath = path.join(pythonFolder, 'python');
+    console.log('FFmpeg found in dependencies.');
   }
+
+  // Check for Python in the dependencies folder
+  if (!fs.existsSync(pythonFolder)) {
+    console.log('Python not found in dependencies. Downloading and installing...');
+    try {
+      await downloadPython(dependenciesFolder);
+    } catch (error) {
+      console.error('Failed to download and install Python:', error.message);
+      console.log('Please download Python 3.9.0 manually and place it in the following folder:');
+      console.log(pythonFolder);
+      throw error;
+    }
+  }
+  pythonPath = path.join(pythonFolder, 'install/bin/python3');
 
   // Create virtual environment if it doesn't exist
   if (!fs.existsSync(venvFolder)) {
     console.log('Creating virtual environment...');
-    await exec(`"${pythonPath}" -m venv "${venvFolder}"`);
+
+    try {
+      await new Promise((resolve, reject) => {
+        exec(`"${pythonPath}" -m venv "${venvFolder}"`, (error, stdout, stderr) => {
+          if (error) {
+            console.error(`Error creating virtual environment: ${error.message}`);
+            reject(error);
+          } else {
+            console.log('Virtual environment created successfully');
+            resolve();
+          }
+        });
+      });
+    } catch (error) {
+      console.error('Failed to create virtual environment:', error);
+      throw error;
+    }
   }
 
   // Install required packages
@@ -975,26 +904,32 @@ async function setupDependencies() {
     path.join(venvFolder, 'Scripts', 'python') : 
     path.join(venvFolder, 'bin', 'python');
   const requirementsPath = getResourcePath('requirements.txt');
-  
-  console.log("REQUIREMENTS", requirementsPath);
 
   // Upgrade pip first
-  const upgradePipCommand = `"${venvPythonPath}" -m pip install --upgrade pip`;
+  const upgradePipCommand = `"${venvPythonPath}" -m pip install --upgrade pip && "${venvPythonPath}" -m pip cache purge`;
   console.log("Upgrading pip command:", upgradePipCommand);
   try {
-    const { stdout, stderr } = await exec(upgradePipCommand);
-    console.log('Pip upgrade stdout:', stdout);
-    console.log('Pip upgrade stderr:', stderr);
+    await new Promise((resolve, reject) => {
+      exec(upgradePipCommand, (error, stdout, stderr) => {
+        if (error) {
+          console.error('Error upgrading pip:', error);
+          reject(error);
+        } else {
+          console.log('Pip upgrade stdout:', stdout);
+          console.log('Pip upgrade stderr:', stderr);
+          console.log('Pip upgrade completed successfully');
+          resolve();
+        }
+      });
+    });
   } catch (error) {
     console.error('Error upgrading pip:', error);
+    throw error; // Rethrow the error to stop the process if pip upgrade fails
   }
 
   // Install packages with verbose output
-  const pipInstall = process.platform === 'darwin' ?
-    `"${venvPythonPath}3" -m pip install -r "${requirementsPath}" -v` :
-    `"${venvPythonPath}" -m pip install -r "${requirementsPath}" -v`;
+  const pipInstall = `"${venvPythonPath}" -m pip install -r "${requirementsPath}" -v`;
   console.log("Installing packages command:", pipInstall);
-  
   // Execute pip install and wait for it to complete
   return new Promise((resolve, reject) => {
     const child = exec(pipInstall);
@@ -1019,6 +954,7 @@ async function setupDependencies() {
   });
 }
 
+
 async function downloadAndOpenPythonInstaller() {
   const pythonVersion = '3.9.0';
   const installerUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-macosx10.9.pkg`;
@@ -1038,52 +974,165 @@ async function downloadAndOpenPythonInstaller() {
 }
 
 
-async function installFFmpeg() {
-  return new Promise((resolve, reject) => {
-    let command;
-    switch (os.platform()) {
+
+async function installFFmpeg(ffmpegFolder) {
+  return new Promise(async (resolve, reject) => {
+    let ffmpegUrl;
+    let fileName;
+
+    switch (process.platform) {
       case 'darwin':
-        command = 'brew install ffmpeg';
+        ffmpegUrl = 'https://evermeet.cx/ffmpeg/ffmpeg-5.1.2.zip';
+        fileName = 'ffmpeg.zip';
         break;
       case 'win32':
-        command = 'winget install ffmpeg';
+        ffmpegUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
+        fileName = 'ffmpeg.zip';
         break;
       case 'linux':
-        if (os.release().toLowerCase().includes('ubuntu') || os.release().toLowerCase().includes('debian')) {
-          command = 'sudo apt-get update && sudo apt-get install -y ffmpeg';
-        } else if (os.release().toLowerCase().includes('fedora') || os.release().toLowerCase().includes('centos')) {
-          command = 'sudo dnf install -y ffmpeg';
-        } else {
-          reject(new Error('Unsupported Linux distribution'));
-          return;
-        }
+        ffmpegUrl = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz';
+        fileName = 'ffmpeg.tar.xz';
         break;
       default:
         reject(new Error('Unsupported operating system'));
         return;
     }
 
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        console.error(`Error installing FFmpeg: ${error.message}`);
-        reject(error);
-      } else {
-        console.log('FFmpeg installed successfully');
-        resolve();
-      }
+    const filePath = path.join(ffmpegFolder, fileName);
+
+    console.log(`Downloading FFmpeg from ${ffmpegUrl}`);
+
+    // Ensure the ffmpegFolder exists
+    await fs.ensureDir(ffmpegFolder);
+
+    // Download the file
+    const file = fs.createWriteStream(filePath);
+    https.get(ffmpegUrl, (response) => {
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close(async () => {
+          console.log('FFmpeg download completed. Extracting...');
+          
+          try {
+            if (process.platform === 'linux') {
+              // For Linux, use tar to extract
+              await exec(`tar xf "${filePath}" -C "${ffmpegFolder}"`);
+            } else {
+              // For Windows and macOS, use extract-zip
+              await extract(filePath, { dir: ffmpegFolder });
+            }
+
+            // Clean up the downloaded file
+            await fs.remove(filePath);
+
+            // Rename the extracted file to 'ffmpeg' if it's not already named that
+            const files = await fs.readdir(ffmpegFolder);
+            if (files.length === 1 && files[0] !== 'ffmpeg') {
+              await fs.rename(path.join(ffmpegFolder, files[0]), path.join(ffmpegFolder, 'ffmpeg'));
+            }
+
+            // Make the ffmpeg file executable (for macOS and Linux)
+            if (process.platform !== 'win32') {
+              await fs.chmod(path.join(ffmpegFolder, 'ffmpeg'), '755');
+            }
+
+            console.log('FFmpeg installed successfully in dependencies folder');
+            resolve();
+          } catch (error) {
+            console.error('Error extracting FFmpeg:', error);
+            reject(error);
+          }
+        });
+      });
+    }).on('error', (err) => {
+      fs.unlink(filePath);
+      console.error(`Error downloading FFmpeg: ${err.message}`);
+      reject(err);
     });
   });
 }
+
+
+
+// async function installFFmpeg() {
+//   return new Promise((resolve, reject) => {
+//     let command;
+//     switch (os.platform()) {
+//       case 'darwin':
+//         command = 'brew install ffmpeg';
+//         break;
+//       case 'win32':
+//         command = 'winget install ffmpeg';
+//         break;
+//       case 'linux':
+//         if (os.release().toLowerCase().includes('ubuntu') || os.release().toLowerCase().includes('debian')) {
+//           command = 'sudo apt-get update && sudo apt-get install -y ffmpeg';
+//         } else if (os.release().toLowerCase().includes('fedora') || os.release().toLowerCase().includes('centos')) {
+//           command = 'sudo dnf install -y ffmpeg';
+//         } else {
+//           reject(new Error('Unsupported Linux distribution'));
+//           return;
+//         }
+//         break;
+//       default:
+//         reject(new Error('Unsupported operating system'));
+//         return;
+//     }
+
+//     exec(command, (error, stdout, stderr) => {
+//       if (error) {
+//         console.error(`Error installing FFmpeg: ${error.message}`);
+//         reject(error);
+//       } else {
+//         console.log('FFmpeg installed successfully');
+//         resolve();
+//       }
+//     });
+//   });
+// }
+
+function launchKodan() {
+  let kodanPath;
+  if (app.isPackaged) {
+    kodanPath = path.join(process.resourcesPath, '..', 'MacOS', 'kodan');
+  } else {
+    kodanPath = path.join(__dirname, 'kodan');
+  }
+
+  console.log('Launching Kodan from:', kodanPath);
+
+  const child = spawn(kodanPath, [], {
+    detached: true,
+    stdio: 'inherit'
+  });
+
+  child.unref();
+  app.quit();
+}
+
+
 
 app.whenReady().then(() => {
   // app.setAppUserModelId('com.serenidad.kodan'); // Optional for Windows, doesn't impact macOS
 
   // const image = nativeImage.createFromPath('./KodanFlower.icns');
   // app.dock.setIcon(image);  
+
+  // if (app.isPackaged) {
+  //   // Check if we're already running the internal executable
+  //   if (process.argv[0].endsWith('MacOS/kodan')) {
+  //     createWindow();
+  //   } else {
+  //     launchKodan();
+  //   }
+  // } else {
+  //   createWindow();
+  // }
+
   createWindow()
+   app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096');
   app.commandLine.appendSwitch('use-angle', 'metal');  // Use Metal for rendering on Apple Silicon
   process.env.PYTORCH_ENABLE_MPS_FALLBACK = "1";
-
 });
 
 let lastNumber = 0
@@ -1133,79 +1182,122 @@ function checkAndRenderClip(projectPath, sceneNumber) {
 }
 
 
-ipcMain.on('run-voice-model', async (event, arg) => {
-  await setupDependencies();
-  const { venvPath, runModelPath, voicePath } = updatePaths();
+ipcMain.on('run-voice-model', (event, arg) => {
+  console.log('run-voice-model event received:', arg);
+  try {
+    const { venvPath, runModelPath, voicePath } = updatePaths();
+    console.log('Paths updated:', { venvPath, runModelPath, voicePath });
 
-  const sceneNumber = parseInt(arg.outputLocation.split("Voicelines/")[1].split(".mp3")[0]);
-  generatingVoicelines.add(sceneNumber);
+    const sceneNumber = parseInt(arg.outputLocation.split("Voicelines/")[1].split(".mp3")[0]);
+    console.log('Scene number:', sceneNumber);
+    generatingVoicelines.add(sceneNumber);
+    console.log('Added to generatingVoicelines:', Array.from(generatingVoicelines));
 
-  // const venvPath = path.join(__dirname, '../venv'); // Path to your virtual environment
-  const outputLocation = arg.outputLocation;
-  const prompt = arg.prompt;
-  const maxLength = arg.maxLength || 250;
-  const projectPath = arg.outputLocation.split("/Voicelines")[0];
-  const voicesDir = path.join(rootFolder, 'Voices');
-  const speakerWav = path.join(voicesDir, `${arg.speakerWav}.wav`);
-  const language = arg.language || "en";
+    const outputLocation = arg.outputLocation;
+    const prompt = arg.prompt;
+    const maxLength = arg.maxLength || 250;
+    const projectPath = arg.outputLocation.split("/Voicelines")[0];
+    const voicesDir = path.join(rootFolder, 'Voices');
+    const speakerWav = path.join(voicesDir, `${arg.speakerWav}.wav`);
+    const language = arg.language || "en";
+    console.log('Voice generation parameters:', { outputLocation, prompt, maxLength, projectPath, voicesDir, speakerWav, language });
 
-  // Ensure the speaker WAV file exists, otherwise use Narrator.wav
-  const defaultNarratorPath = path.join(voicesDir, 'Narrator.wav');
-  const finalSpeakerWav = fs.existsSync(speakerWav) ? speakerWav : defaultNarratorPath;
+    // Ensure the speaker WAV file exists, otherwise use Narrator.wav
+    const defaultNarratorPath = path.join(voicesDir, 'Narrator.wav');
+    const finalSpeakerWav = fs.existsSync(speakerWav) ? speakerWav : defaultNarratorPath;
+    console.log('Final speaker WAV path:', finalSpeakerWav);
 
-  const activateAndRun = `source ${venvPath}/bin/activate && python3 -u ${voicePath} "${prompt}" "${outputLocation}" ${maxLength} "${finalSpeakerWav}" "${language}"`;
+    const pythonPath = process.platform === 'win32' 
+      ? path.join(venvPath, 'Scripts', 'python.exe')
+      : path.join(venvPath, 'bin', 'python');
+    console.log('Python path:', pythonPath);
 
-  const process = exec(activateAndRun);
+    const activateAndRun = `source ${venvPath}/bin/activate && "${pythonPath}" -u "${voicePath}" "${prompt}" "${outputLocation}" ${maxLength} "${finalSpeakerWav}" "${language}"`;
+    console.log('Executing command:', activateAndRun);
 
-  let isProcessClosed = false;
+    const childProcess = exec(activateAndRun);
+    console.log('Child process started');
 
-  process.stdout.on('data', (data) => {
-    if (!isProcessClosed) {
-      data.split('\n').forEach(line => {
-        const trimmedLine = line.trim();
-        console.log('stdout:', trimmedLine);
-        event.sender.send('voice-progress-update', trimmedLine);
-      });
-    }
-  });
+    let isProcessClosed = false;
 
-  process.stderr.on('data', (data) => {
-    if (!isProcessClosed) {
-      console.warn('stderr:', data.toString());
-      event.sender.send('voice-error', data.toString());
-    }
-  });
+    childProcess.stdout.on('data', (data) => {
+      if (!isProcessClosed) {
+        data.split('\n').forEach(line => {
+          const trimmedLine = line.trim();
+          console.log('Child process stdout:', trimmedLine);
+          event.sender.send('voice-progress-update', trimmedLine);
+        });
+      }
+    });
 
-  process.on('close', (code) => {
-    isProcessClosed = true;
-    generatingVoicelines.delete(sceneNumber);
-    if (code === 0) {
-      // Update project.kodan with the voice line path
-      const projectFilePath = path.join(projectPath, 'project.kodan');
-      const projectData = JSON.parse(fs.readFileSync(projectFilePath, 'utf-8'));
+    childProcess.stderr.on('data', (data) => {
+      if (!isProcessClosed) {
+        console.warn('Child process stderr:', data.toString());
+        event.sender.send('voice-error', data.toString());
+      }
+    });
 
-      projectData.scenes[sceneNumber - 1].voiceLinePath = outputLocation;
-      projectData.scenes[sceneNumber - 1].voiceLine = prompt;
+    childProcess.on('close', (code) => {
+      console.log(`Child process closed with code: ${code}`);
+      isProcessClosed = true;
+      generatingVoicelines.delete(sceneNumber);
+      console.log('Removed from generatingVoicelines:', Array.from(generatingVoicelines));
 
-      fs.writeFileSync(projectFilePath, JSON.stringify(projectData, null, 2), 'utf-8');
+      if (code === 0) {
+        console.log('Voice generation successful, updating project file');
+        // Update project.kodan with the voice line path
+        const projectFilePath = path.join(projectPath, 'project.kodan');
+        console.log('Project file path:', projectFilePath);
 
-      console.log(`Process exited with code: ${code}`);
-      event.sender.send('voice-model-response', {
-        success: true,
-        message: 'MP3 generation completed successfully',
-      });
+        let projectData;
+        try {
+          projectData = JSON.parse(fs.readFileSync(projectFilePath, 'utf-8'));
+          console.log('Project data loaded successfully');
+        } catch (err) {
+          console.error('Error reading project file:', err);
+          throw err;
+        }
 
-      checkAndRenderClip(projectPath, sceneNumber); // Check and render clip if the image also exists
-    } else {
-      event.sender.send('voice-model-response', {
-        success: false,
-        message: `Process exited with code ${code}`,
-      });
-    }
-    event.sender.send('voice-generation-status', { sceneNumber, isGenerating: false });
-  });
+        projectData.scenes[sceneNumber - 1].voiceLinePath = outputLocation;
+        projectData.scenes[sceneNumber - 1].voiceLine = prompt;
+        console.log('Updated project data:', projectData.scenes[sceneNumber - 1]);
+
+        try {
+          fs.writeFileSync(projectFilePath, JSON.stringify(projectData, null, 2), 'utf-8');
+          console.log('Project file updated successfully');
+        } catch (err) {
+          console.error('Error writing project file:', err);
+          throw err;
+        }
+
+        console.log('Sending success response to renderer');
+        event.sender.send('voice-model-response', {
+          success: true,
+          message: 'MP3 generation completed successfully',
+        });
+
+        console.log('Checking and rendering clip');
+        checkAndRenderClip(projectPath, sceneNumber);
+      } else {
+        console.log('Voice generation failed, sending error response to renderer');
+        event.sender.send('voice-model-response', {
+          success: false,
+          message: `Process exited with code ${code}`,
+        });
+      }
+      console.log('Sending generation status update to renderer');
+      event.sender.send('voice-generation-status', { sceneNumber, isGenerating: false });
+    });
+  } catch (error) {
+    console.error('Error in run-voice-model:', error);
+    console.log('Stack trace:', error.stack);
+    event.sender.send('voice-model-response', {
+      success: false,
+      message: `An error occurred: ${error.message}`,
+    });
+    event.sender.send('voice-generation-status', { sceneNumber: -1, isGenerating: false });
+  }
 });
-
 
 ipcMain.on('close-window', () => {
   const window = BrowserWindow.getFocusedWindow();
