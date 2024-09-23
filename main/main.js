@@ -1131,6 +1131,7 @@ app.whenReady().then(() => {
 
   createWindow()
    app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096');
+   
   app.commandLine.appendSwitch('use-angle', 'metal');  // Use Metal for rendering on Apple Silicon
   process.env.PYTORCH_ENABLE_MPS_FALLBACK = "1";
 });

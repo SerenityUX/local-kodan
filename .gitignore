@@ -170,6 +170,9 @@ tmp/
 *.log
 *.tmp
 
+KodanDesktop.provisionprofile
+./KodanDesktop.provisionprofile
+
 # IDE and system files
 .vscode/
 .idea/

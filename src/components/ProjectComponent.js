@@ -4,8 +4,12 @@ import animeFacts from './animeFacts.json';
 import { Img } from 'react-image'
 import { useInterval } from 'react-use';
 import { Tooltip } from 'react-tooltip';
+import ollama from 'ollama/browser'
 
 const ProjectComponent = ({ filePath }) => {
+  const [composeComplete, setComposeComplete] = useState(false);
+  const [storyboardMode, setStoryboardMode] = useState(false);
+
   const [projectData, setProjectData] = useState(null);
   const [thumbnail, setThumbnail] = useState('');
   const [aspectRatio, setAspectRatio] = useState(1);
@@ -33,6 +37,105 @@ const ProjectComponent = ({ filePath }) => {
   const [isTransitioning, setIsTransitioning] = useState(false);
 
   const [currentFact, setCurrentFact] = useState('');
+
+  const [enrichedStory, setEnrichedStory] = useState('');
+
+  const [characters, setCharacters] = useState([]);
+
+
+  const fetchEnrichment = async () => {
+    console.log("Starting to fetch enrichment for the story...");
+    const message = { 
+      role: 'user', 
+      content: `Please enrich my story by giving it specific details about specific actions taking place and a start, rising action, and climax and very specific characters. Do not use nicknames and always only refer to people by their first name (not their title or by mrs or mr. or miss.). Respond with nothing but the enriched version: ${composeUserInput}.` 
+    };
+    console.log("Sending message to ollama for enrichment:", message);
+    const response = await ollama.chat({ model: 'llama3.1', messages: [message], stream: true });
+    console.log("Received response from ollama for enrichment:", response);
+    let output = '';
+    for await (const part of response) {
+      console.log("Processing part of the response:", part);
+      output += part.message.content;
+      console.log("Updating enriched story with new output:", output);
+      setEnrichedStory(output); // Update the state with the current output
+    }
+    console.log("Enrichment fetching completed. Final output:", output);
+
+    // New follow-up prompt to get character names
+    const characterMessage = { 
+      role: 'user', 
+      content: `Please provide a comma-separated list of the characters' names from the previous response for every character in the story. Make sure to not repeat characters & only include them by their normal name (not nickname). Respond with nothing but the character comma separated list and no clarifying message before or after. No clarifications or notes.    ${output}` 
+    };
+    console.log("Sending follow-up message to ollama for character names:", characterMessage);
+    const characterResponse = await ollama.chat({ model: 'llama3.1', messages: [characterMessage], stream: true });
+    
+    let characterOutput = '';
+    for await (const part of characterResponse) {
+      characterOutput += part.message.content;
+    }
+    console.log("Received character names:", characterOutput);
+    const uniqueCharacters = [...new Set(characterOutput.split(',').map(name => name.trim()))];
+    const characterObjects = uniqueCharacters.map(name => ({ name: name, plotDescription: '', visualDescription: '' })); // Initialize plotDescription
+    setCharacters(characterObjects); // Set the characters state
+
+    // Iterate through each character to fetch their plot description
+    for (let i = 0; i < characterObjects.length; i++) {
+      const character = characterObjects[i]; // Get the current character
+      console.log(`Fetching plot description for character: ${character.name}`);
+      // Prepare the message to send to ollama for plot description
+      const plotMessage = { 
+        role: 'user', 
+        content: `Please provide me a one sentence plot description of ${character.name}. FOCUS ON JUST THIS CHARACTER AND THEIR ROLE IN THE STORY, NOT THE ENVIRONMENT. Do not provide any sort of clarification to your message like: "Here's the plot description" respond with only the sentence. Here's the story: ${output}` 
+      };
+      console.log(`Sending plot description request to ollama for character: ${character.name}`);
+      // Send the message to ollama and await the response
+      const characterPlotDescription = await ollama.chat({ model: 'llama3.1', messages: [plotMessage]});
+      console.log(`Received plot description response for character: ${character.name} as ${characterPlotDescription}`);
+      
+      console.log(characterPlotDescription)
+      // Assuming characterPlotDescription is a single string response
+      const plotDescription = characterPlotDescription.message.content; // Extract the plot description from the response
+      
+      console.log(`Extracted plot description for character: ${character.name} as ${plotDescription}`);
+      // Update the character object with the plot description
+      setCharacters(prevCharacters => 
+        prevCharacters.map(item => 
+          item.name === character.name ? { ...item, plotDescription: plotDescription } : item
+        )
+      );
+      console.log(`Updated character object with plot description for character: ${character.name}`);
+    }
+
+    // Iterate through each character to fetch their plot description
+    for (let i = 0; i < characterObjects.length; i++) {
+      const character = characterObjects[i]; // Get the current character
+      console.log(`Fetching plot description for character: ${character.name}`);
+      // Prepare the message to send to ollama for plot description
+      const visualMessage = { 
+        role: 'user', 
+        content: `Please provide me a keyword comma separated visual descripton (for a stable diffusion 1.5 prompt) of ${character.name}. DO NOT DESCRIBE THEIR ENVIRONMENT BUT RATHER ONLY SPECIFIC VISUAL FEATURES OF THE CHARACTER GENERALIZABLE THROUGHOUT TIME. Do not provide any sort of clarification to your message like: "Here's the visual description" respond with only the comma separated list of specific visual keywords that decide things like their gender, age, race (white, black, asian, hispanic, native american, middle eastern, indian, etc) (or if a non-human creature then mention the creature type and the color of the create like blue, green, orange, yellow, red, etc), hair color, eye color, outfit, etc based on the role they play in the story. ONLY VISUALS, NOTHING PLOT-RELATED. Here's the story: ${output}` 
+      };
+      console.log(`Sending visual description request to ollama for character: ${character.name}`);
+      // Send the message to ollama and await the response
+      const characterVisualDescription = await ollama.chat({ model: 'llama3.1', messages: [visualMessage]});
+      console.log(`Received visual description response for character: ${character.name} as ${characterVisualDescription}`);
+      
+      console.log(characterVisualDescription)
+      // Assuming characterPlotDescription is a single string response
+      const visualDescription = characterVisualDescription.message.content; // Extract the plot description from the response
+      
+      console.log(`Extracted visual description for character: ${character.name} as ${visualDescription}`);
+      // Update the character object with the plot description
+      setCharacters(prevCharacters => 
+        prevCharacters.map(item => 
+          item.name === character.name ? { ...item, visualDescription: visualDescription } : item
+        )
+      );
+      console.log(`Updated character object with visual description for character: ${character.name}`);
+      
+    }
+    setComposeComplete(true)
+  };
 
   const generateVoiceLine = async (sceneIndex) => {
     const outputLocation = `${filePath.split("/project.kodan")[0]}/Voicelines/${sceneIndex}.mp3`;
@@ -655,6 +758,7 @@ const handleSpeakerChange = async (event) => {
     }
   };
 
+  
   const [composeMode, setComposeMode] = useState(false);
 
 
@@ -1531,10 +1635,16 @@ style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
         </div>
 <div style={{display: "flex", flexDirection: "row", widows: "100vw", justifyContent: "center"}}>
 
-<div style={{display: "flex", height: "100%", width: "50vw", borderLeft: "1px solid #D9D9D9",  borderRight: "1px solid #D9D9D9"}}>
+{storyboardMode && 
+<div style={{display: "flex", justifyContent: "center", alignItems: "center", width: "100vw", height: "calc(100vh - 46px)"}}>
+  <p>Storyboard Mode</p>
+</div>
+}
+
+{!storyboardMode && <div style={{display: "flex", height: "100%", width: "50vw", borderLeft: "1px solid #D9D9D9",  borderRight: "1px solid #D9D9D9"}}>
 <div style={{ position: 'relative', width: "100%", height: "100%", display: "flex" }}>
   <textarea 
-    style={{width: '100%', padding: '8px', height: 'calc(100vh - 46px)', border: '0px', borderRadius: '0px', resize: 'none', overflowY: 'auto', fontFamily: 'system-ui, sans-serif'}}
+    style={{width: '100%', fontSize: 16, padding: '8px', height: characters.length == 0 ? 'calc(100vh - 46px)' : 'calc(100vh - 306px)', transition: 'height 0.2s ease-out', border: '0px', borderRadius: '0px', resize: 'none', overflowY: 'auto', fontFamily: 'system-ui, sans-serif'}}
     value={composeUserInput}
     onChange={e => setComposeUserInput(e.target.value)}
     placeholder="Compose your story..."
@@ -1544,19 +1654,48 @@ style={{display: "flex", flexDirection: "column", gap: 4, marginTop: 8}}>
   {!composeSubmitted && <button 
     style={{ position: 'absolute', bottom: 12, right: 12, backgroundColor: '#000', color: 'white', border: 'none', fontWeight: 500, borderRadius: '4px', fontSize: "16px", padding: "4px 8px", cursor: 'pointer', opacity: composeUserInput ? 1 : 0.5 }}
     disabled={!composeUserInput}
-    onClick={() => setComposeSubmitted(true)}
+    onClick={() => 
+      {
+        setComposeSubmitted(true)
+        fetchEnrichment()
+    }
+    }
   >
     Generate Story
   </button>}
 </div>        
-</div>
-{composeSubmitted &&        <div style={{display: "flex", height: "100%", width: "50vw", borderLeft: "0px solid #D9D9D9",  borderRight: "1px solid #D9D9D9"}}>
-<div style={{ position: 'relative', width: "100%", height: "100%", display: "flex" }}>
-  <p style={{fontSize: 16, width: "100%", height: "100%", display: "flex", margin: 0, padding: 8}}>Enriching Story...</p>
-  
+</div>}
+{(!storyboardMode) &&        <div style={{display: "flex", height: "100%", width: composeSubmitted ? ("50vw") : ("0vw"), transition: "width 0.2s ease-out", borderLeft: "0px solid #D9D9D9",  borderRight: "1px solid #D9D9D9"}}>
+<div style={{ position: 'relative', width: composeSubmitted ? "100%" : "0", transition: "width 0.2s ease-out", height: "100%", display: "flex" }}>
+  {composeSubmitted && <p style={{fontSize: 16, width: "100%", overflowY: "scroll", height: characters.length == 0 ? 'calc(100vh - 46px)' : 'calc(100vh - 306px)', transition: 'height 0.2s ease-out', display: "flex", margin: 0, padding: 8}}>{enrichedStory != "" ? (enrichedStory) : ("Enriching Story... ")}</p>}
 </div>        
 </div>}
+
 </div>
+{(characters.length != 0 && !storyboardMode) && <div style={{height: characters.length == 0 ? '0px' : '259px', transition: 'height 0.2s ease-out', padding: 16, gap: 8, display: "flex", flexDirection: "row", width: "calc(100vw - 32px)", borderTop: "1px solid #D9D9D9"}}>
+    
+    {characters.map((character) => <div style={{width: 130, borderRadius: 4, height: 185, border: "1px solid #000", padding: 8}}>
+      <p style={{margin: 0, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{character.name}</p>
+      <div style={{width: "calc(100% - 10px)", display: "flex", border: "1px solid #000", borderRadius: 2, padding: 4}}>
+      <p style={{margin: 0, fontSize: 10, overflowY: 'scroll', height: 74, width: "100%"}}>{character.visualDescription}</p>
+      </div>
+      {/* <p style={{margin: 0, fontSize: 10, height: 74, width: "100%"}}>Character plot description...</p> */}
+      <p style={{margin: 0, fontSize: 10, height: 98, overflowY: "scroll", width: "100%"}}>{character.plotDescription}</p>
+
+    </div>)}
+    {composeComplete && <button 
+    style={{ position: 'absolute', bottom: 12, right: 12, backgroundColor: '#000', color: 'white', border: 'none', fontWeight: 500, borderRadius: '4px', fontSize: "16px", padding: "4px 8px", cursor: 'pointer', opacity: composeUserInput ? 1 : 0.5 }}
+    disabled={!composeUserInput}
+    onClick={() => 
+      {
+        setStoryboardMode(true)
+        console.log("Generating storyboard...")
+    }
+    }
+  >
+    Generate Storyboard
+  </button>}
+</div>}
       </div> 
   )
 )}
